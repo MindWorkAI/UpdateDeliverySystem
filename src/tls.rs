@@ -1,0 +1,35 @@
+use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
+
+use crate::config::{ServerConfig, TlsMode};
+use crate::errors::{Result, UdsError};
+
+pub async fn serve(config: ServerConfig, router: Router) -> Result<()> {
+    match config.tls.mode {
+        TlsMode::Off => {
+            tracing::info!(bind = %config.bind, "starting HTTP server without TLS");
+            axum_server::bind(config.bind)
+                .serve(router.into_make_service())
+                .await
+                .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
+        }
+        TlsMode::Files => {
+            let cert_path = config.tls.cert_path.as_ref().expect("validated cert_path");
+            let key_path = config.tls.key_path.as_ref().expect("validated key_path");
+            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
+            tracing::info!(bind = %config.bind, "starting HTTPS server with file-based TLS");
+            axum_server::bind_rustls(config.bind, tls_config)
+                .serve(router.into_make_service())
+                .await
+                .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
+        }
+        TlsMode::Acme => {
+            return Err(UdsError::Config(
+                "ACME mode is validated in configuration but not wired into the server runtime yet; use tls.mode = \"files\" or terminate TLS at a load balancer for now"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}

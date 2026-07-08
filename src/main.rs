@@ -3,7 +3,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use update_delivery_system::cluster::{ClusterState, spawn_background_tasks};
-use update_delivery_system::config::Cli;
+use update_delivery_system::config::{Cli, CliCommand};
 use update_delivery_system::{AppState, ServerConfig, build_router};
 
 #[tokio::main]
@@ -13,6 +13,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if let Some(CliCommand::Client { command }) = cli.command {
+        update_delivery_system::client::run(command).await?;
+        return Ok(());
+    }
+
     let config = ServerConfig::load(&cli).await?;
     let storage = update_delivery_system::storage::Storage::new(config.data_dir.clone(), config.public_base_url.clone()).await?;
     let stats = update_delivery_system::stats::StatsRecorder::new(config.data_dir.clone()).await?;

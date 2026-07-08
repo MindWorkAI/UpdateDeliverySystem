@@ -116,96 +116,99 @@ GET /api/v1/downloads/{channel}/{version}/{target}-{arch}/{file_name}
 
 UDS streams the artifact and records local download statistics.
 
-## Administration API
+## Administration Client
 
-All administration requests require:
+Administrators should normally use the `uds` client mode instead of calling the Admin API manually:
 
-```http
-Authorization: Bearer <admin_token>
+```bash
+uds client
 ```
+
+You can also start a specific workflow directly:
+
+```bash
+uds client configure
+uds client upload
+uds client changelog
+uds client withdraw
+uds client copy
+uds client stats
+```
+
+The first client run offers to create a local profile. The profile stores the UDS base URL, admin token, and default channel in a user-local config file. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
+
+### Configure the Client
+
+```bash
+uds client configure
+```
+
+The prompt asks for:
+
+- Profile name.
+- UDS base URL.
+- Admin token.
+- Default channel.
+
+Config file locations are selected from the operating system's user config directory, for example `~/.config/mindwork-ai/uds/client.toml` on many Linux systems.
 
 ### Upload a Release
 
-```http
-POST /admin/v1/channels/{channel}/releases
-Content-Type: multipart/form-data
-```
-
-The multipart request must contain one `metadata` field with JSON and one file field per platform.
-
-Example metadata:
-
-```json
-{
-  "version": "26.7.2",
-  "pub_date": "2026-07-07T12:00:00Z",
-  "notes": "Fixed update delivery for enterprise deployments.",
-  "platforms": {
-    "windows-x86_64": {
-      "file_field": "windows_x86_64_bundle",
-      "file_name": "MindWork-AI-Studio_26.7.2_windows_x86_64.zip",
-      "signature": "signature-content"
-    },
-    "darwin-aarch64": {
-      "file_field": "darwin_aarch64_bundle",
-      "file_name": "MindWork-AI-Studio_26.7.2_darwin_aarch64.tar.gz",
-      "signature": "signature-content"
-    }
-  }
-}
-```
-
-Example upload:
-
 ```bash
-curl -X POST https://updates.example.org/admin/v1/channels/stable/releases \
-  -H "Authorization: Bearer ${UDS_ADMIN_TOKEN}" \
-  -F 'metadata=@metadata.json;type=application/json' \
-  -F 'windows_x86_64_bundle=@MindWork-AI-Studio_26.7.2_windows_x86_64.zip' \
-  -F 'darwin_aarch64_bundle=@MindWork-AI-Studio_26.7.2_darwin_aarch64.tar.gz'
+uds client upload
 ```
+
+The upload wizard asks for the channel and source. Supported sources:
+
+- A GitHub release URL, GitHub tag URL, or direct `latest.json` URL.
+- A local Tauri `latest.json` file plus a directory containing the referenced artifacts.
+
+For GitHub imports, UDS downloads the Tauri updater `latest.json`, downloads all referenced artifacts, computes SHA-256 hashes and sizes, and shows a review screen before uploading anything to UDS. The review includes version, channel, notes preview, platform keys, file names, source URLs, sizes, SHA-256 hashes, and signatures. The upload only starts after explicit confirmation.
 
 ### Correct a Changelog
 
 Use this when a typo or wording issue must be corrected without rebuilding release artifacts.
 
 ```bash
-curl -X PATCH https://updates.example.org/admin/v1/channels/stable/releases/26.7.2/changelog \
-  -H "Authorization: Bearer ${UDS_ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"notes":"Fixed the corrected release notes text."}'
+uds client changelog
 ```
 
-Only release notes are changed. The version, artifact files, signatures, and checksums stay unchanged.
+The client asks for the channel, fetches available releases from UDS, shows them newest-first, and lets the administrator select the release. Only release notes are changed. The version, artifact files, signatures, and checksums stay unchanged.
 
 ### Withdraw a Release
 
 ```bash
-curl -X DELETE https://updates.example.org/admin/v1/channels/stable/releases/26.7.2 \
-  -H "Authorization: Bearer ${UDS_ADMIN_TOKEN}"
+uds client withdraw
 ```
 
-Withdrawn releases remain on disk but are not offered to clients.
+The client asks for the channel, fetches available releases from UDS, shows them newest-first, and asks for confirmation before withdrawing the selected release. Withdrawn releases remain on disk but are not offered to clients.
 
 ### Copy a Release to Another Channel
 
 ```bash
-curl -X POST https://updates.example.org/admin/v1/channels/beta/copy \
-  -H "Authorization: Bearer ${UDS_ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"source_channel":"stable","version":"26.7.2"}'
+uds client copy
 ```
 
-This is useful when a release should move from `beta` to `stable` without uploading the artifacts again.
+The client asks for the source channel, fetches releases newest-first, lets the administrator select one, then asks for the target channel and confirmation. This is useful when a release should move from `beta` to `stable` without uploading the artifacts again.
 
 ### Retrieve Statistics
 
 ```bash
-curl https://updates.example.org/admin/v1/channels/stable/stats \
-  -H "Authorization: Bearer ${UDS_ADMIN_TOKEN}"
+uds client stats
 ```
 
 Statistics include update checks, downloads, estimated traffic, and per-platform counters. Single-node mode returns local statistics. Fleet mode keeps the same API and is designed to aggregate peer statistics.
+
+## Administration API Reference
+
+The client uses the following Admin API endpoints. All administration requests require `Authorization: Bearer <admin_token>`.
+
+- `GET /admin/v1/channels/{channel}/releases`
+- `POST /admin/v1/channels/{channel}/releases`
+- `PATCH /admin/v1/channels/{channel}/releases/{version}/changelog`
+- `DELETE /admin/v1/channels/{channel}/releases/{version}`
+- `POST /admin/v1/channels/{target_channel}/copy`
+- `GET /admin/v1/channels/{channel}/stats`
 
 ## Fleet Operation
 

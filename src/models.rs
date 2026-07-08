@@ -41,6 +41,23 @@ pub struct ReleaseManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseListEntry {
+    pub version: String,
+
+    #[serde(default)]
+    pub pub_date: Option<String>,
+
+    pub withdrawn: bool,
+    pub platforms: Vec<String>,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseListResponse {
+    pub releases: Vec<ReleaseListEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformArtifact {
     pub file_name: String,
     pub signature: String,

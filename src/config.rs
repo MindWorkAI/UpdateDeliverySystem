@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, UdsError};
@@ -17,6 +17,39 @@ pub struct Cli {
     /// Force single-node mode and disable peer discovery and replication.
     #[arg(long)]
     pub single_node_mode: bool,
+
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    /// Run the interactive UDS administration client.
+    Client {
+        #[command(subcommand)]
+        command: Option<ClientCommand>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum ClientCommand {
+    /// Create or update the local client configuration.
+    Configure,
+
+    /// Upload a release to UDS.
+    Upload,
+
+    /// Withdraw a release from a channel.
+    Withdraw,
+
+    /// Copy a release from one channel to another.
+    Copy,
+
+    /// Update the changelog for an existing release.
+    Changelog,
+
+    /// Show channel statistics.
+    Stats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

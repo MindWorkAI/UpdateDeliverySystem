@@ -9,7 +9,8 @@ use tokio::fs;
 
 use crate::errors::{Result, UdsError};
 use crate::models::{
-    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseManifest, ReleaseUploadMetadata, TauriUpdateResponse,
+    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse, ReleaseManifest, ReleaseUploadMetadata,
+    TauriUpdateResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -193,6 +194,32 @@ impl Storage {
         Ok(self.release_dir(channel, &version).join(file_name))
     }
 
+    pub async fn release_list(&self, channel: &str) -> Result<ReleaseListResponse> {
+        let mut releases = self
+            .list_releases(channel)
+            .await?
+            .into_iter()
+            .map(|manifest| ReleaseListEntry {
+                version: manifest.version,
+                pub_date: manifest.pub_date,
+                withdrawn: manifest.withdrawn,
+                platforms: manifest.platforms.keys().cloned().collect(),
+                updated_at: manifest.updated_at,
+            })
+            .collect::<Vec<_>>();
+
+        releases.sort_by(|left, right| {
+            let left_version = parse_version(&left.version);
+            let right_version = parse_version(&right.version);
+            match (left_version, right_version) {
+                (Ok(left_version), Ok(right_version)) => right_version.cmp(&left_version),
+                _ => right.version.cmp(&left.version),
+            }
+        });
+
+        Ok(ReleaseListResponse { releases })
+    }
+
     pub async fn catalog(&self) -> Result<CatalogResponse> {
         let mut entries = Vec::new();
         let releases_root = self.data_dir.join("releases");
@@ -364,5 +391,42 @@ mod tests {
         assert!(update.notes.contains("Changed in 26.6.0"));
         assert!(update.notes.contains("Changed in 26.7.0"));
         assert!(update.notes.contains("Changed in 26.7.2"));
+    }
+
+    #[tokio::test]
+    async fn release_list_is_sorted_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temp.path().to_path_buf(), "https://updates.example.test".to_string()).await.unwrap();
+
+        for version in ["26.6.0", "26.7.2", "26.7.0"] {
+            let mut platforms = BTreeMap::new();
+            platforms.insert(
+                "linux-x86_64".to_string(),
+                UploadPlatformMetadata {
+                    file_field: "bundle".to_string(),
+                    file_name: format!("ai-studio-{version}.tar.gz"),
+                    signature: format!("signature-{version}"),
+                },
+            );
+            let mut files = BTreeMap::new();
+            files.insert("bundle".to_string(), Bytes::from_static(b"bundle"));
+            storage
+                .put_release(
+                    "stable",
+                    ReleaseUploadMetadata {
+                        version: version.to_string(),
+                        pub_date: None,
+                        notes: String::new(),
+                        platforms,
+                    },
+                    files,
+                )
+                .await
+                .unwrap();
+        }
+
+        let response = storage.release_list("stable").await.unwrap();
+        let versions = response.releases.into_iter().map(|release| release.version).collect::<Vec<_>>();
+        assert_eq!(versions, vec!["26.7.2", "26.7.0", "26.6.0"]);
     }
 }

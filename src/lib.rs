@@ -4,6 +4,7 @@
 //! points directly so route behavior can be verified without binding sockets.
 
 pub mod cluster;
+pub mod client;
 pub mod config;
 pub mod errors;
 pub mod models;

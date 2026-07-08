@@ -36,7 +36,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/updates/{channel}/{target}/{arch}/{current_version}", get(check_update))
         .route("/api/v1/downloads/{channel}/{version}/{platform}/{file_name}", get(download_artifact))
-        .route("/admin/v1/channels/{channel}/releases", post(upload_release))
+        .route("/admin/v1/channels/{channel}/releases", get(list_releases).post(upload_release))
         .route("/admin/v1/channels/{channel}/releases/{version}/changelog", patch(patch_changelog))
         .route("/admin/v1/channels/{channel}/releases/{version}", delete(withdraw_release))
         .route("/admin/v1/channels/{target_channel}/copy", post(copy_release))
@@ -140,6 +140,15 @@ async fn upload_release(
         version: manifest.version,
         replicated,
     }))
+}
+
+async fn list_releases(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(channel): Path<String>,
+) -> Result<Json<crate::models::ReleaseListResponse>> {
+    require_allowed_channel(&state, &channel)?;
+    Ok(Json(state.storage.release_list(&channel).await?))
 }
 
 async fn patch_changelog(

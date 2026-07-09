@@ -254,13 +254,13 @@ UDS uses UTC timestamps and a log layout inspired by the MindWork AI Studio runt
 
 Systemd and file logs are intentionally colorless. Terminal colors are only used when `logging.console.color = "always"` or when `color = "auto"` and stdout is an interactive terminal.
 
-The default production log file path is:
+The default production log base path is:
 
 ```text
 /var/log/mindwork-ai/uds/events.log
 ```
 
-The active file is rotated before it exceeds `logging.file.max_size_mb`, which defaults to 100 MB. Archives are named `events.log.1`, `events.log.2`, and so on up to `logging.file.max_archived_files`.
+UDS uses `flexi_logger` for file rotation and cleanup. The configured `logging.file.path` is the base name for the rotating file set. With the default path above, the active file is `events_rCURRENT.log`; archived files are named `events_r00000.log`, `events_r00001.log`, and so on. The active file is rotated when it exceeds `logging.file.max_size_mb`, which defaults to 100 MB, and UDS keeps up to `logging.file.max_archived_files` archives.
 
 When UDS runs as a systemd service, systemd captures stdout and stderr automatically. Admins can inspect local service logs with:
 

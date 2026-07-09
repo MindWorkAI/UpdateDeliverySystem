@@ -51,9 +51,12 @@ impl IntoResponse for UdsError {
             UdsError::Unauthorized => StatusCode::UNAUTHORIZED,
             UdsError::NotFound(_) => StatusCode::NOT_FOUND,
             UdsError::Conflict(_) => StatusCode::CONFLICT,
-            UdsError::Config(_) | UdsError::Storage(_) | UdsError::Io(_) | UdsError::Json(_) | UdsError::TomlDe(_) | UdsError::Semver(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            UdsError::Config(_)
+            | UdsError::Storage(_)
+            | UdsError::Io(_)
+            | UdsError::Json(_)
+            | UdsError::TomlDe(_)
+            | UdsError::Semver(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let body = Json(ErrorBody {

@@ -17,7 +17,11 @@ async fn main() -> anyhow::Result<()> {
 
     let config = ServerConfig::load(&cli).await?;
     let logging = update_delivery_system::logging::init_server_logging(&config)?;
-    let storage = update_delivery_system::storage::Storage::new(config.data_dir.clone(), config.public_base_url.clone()).await?;
+    let storage = update_delivery_system::storage::Storage::new(
+        config.data_dir.clone(),
+        config.public_base_url.clone(),
+    )
+    .await?;
     let stats = update_delivery_system::stats::StatsRecorder::new(config.data_dir.clone()).await?;
     let cluster = ClusterState::new(&config).await?;
     tracing::info!(

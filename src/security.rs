@@ -14,7 +14,10 @@ pub struct ClusterAuth;
 impl FromRequestParts<AppState> for AdminAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> std::result::Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
         require_bearer(parts.headers.clone(), &state.config.admin_token)?;
         Ok(Self)
     }
@@ -23,7 +26,10 @@ impl FromRequestParts<AppState> for AdminAuth {
 impl FromRequestParts<AppState> for ClusterAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> std::result::Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
         let Some(token) = &state.config.cluster_token else {
             return Err(UdsError::Unauthorized);
         };

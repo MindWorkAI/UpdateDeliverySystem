@@ -9,8 +9,8 @@ use tokio::fs;
 
 use crate::errors::{Result, UdsError};
 use crate::models::{
-    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse, ReleaseManifest, ReleaseUploadMetadata,
-    TauriUpdateResponse,
+    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse,
+    ReleaseManifest, ReleaseUploadMetadata, TauriUpdateResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,10 @@ pub struct Storage {
 
 impl Storage {
     pub async fn new(data_dir: PathBuf, public_base_url: String) -> Result<Self> {
-        let storage = Self { data_dir, public_base_url };
+        let storage = Self {
+            data_dir,
+            public_base_url,
+        };
         storage.ensure_layout().await?;
         Ok(storage)
     }
@@ -41,7 +44,9 @@ impl Storage {
         let release_dir = self.release_dir(channel, &version);
 
         if release_dir.exists() {
-            return Err(UdsError::Conflict(format!("release {channel}/{version} already exists")));
+            return Err(UdsError::Conflict(format!(
+                "release {channel}/{version} already exists"
+            )));
         }
 
         fs::create_dir_all(&release_dir).await?;
@@ -49,9 +54,14 @@ impl Storage {
         let mut platforms = BTreeMap::new();
         for (platform_key, upload_platform) in metadata.platforms {
             validate_platform_key(&platform_key)?;
-            let bytes = uploaded_files.get(&upload_platform.file_field).ok_or_else(|| {
-                UdsError::BadRequest(format!("missing multipart file field '{}'", upload_platform.file_field))
-            })?;
+            let bytes = uploaded_files
+                .get(&upload_platform.file_field)
+                .ok_or_else(|| {
+                    UdsError::BadRequest(format!(
+                        "missing multipart file field '{}'",
+                        upload_platform.file_field
+                    ))
+                })?;
 
             validate_path_segment(&upload_platform.file_name, "file_name")?;
             let artifact_path = release_dir.join(&upload_platform.file_name);
@@ -81,7 +91,12 @@ impl Storage {
         Ok(manifest)
     }
 
-    pub async fn patch_changelog(&self, channel: &str, version: &str, notes: String) -> Result<ReleaseManifest> {
+    pub async fn patch_changelog(
+        &self,
+        channel: &str,
+        version: &str,
+        notes: String,
+    ) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
         let mut manifest = self.load_manifest(channel, &version).await?;
         manifest.notes = notes;
@@ -99,7 +114,12 @@ impl Storage {
         Ok(manifest)
     }
 
-    pub async fn copy_release(&self, source_channel: &str, target_channel: &str, version: &str) -> Result<ReleaseManifest> {
+    pub async fn copy_release(
+        &self,
+        source_channel: &str,
+        target_channel: &str,
+        version: &str,
+    ) -> Result<ReleaseManifest> {
         validate_path_segment(source_channel, "source_channel")?;
         validate_path_segment(target_channel, "target_channel")?;
         let version = normalize_version(version)?;
@@ -107,20 +127,31 @@ impl Storage {
         let target = self.release_dir(target_channel, &version);
 
         if !source.exists() {
-            return Err(UdsError::NotFound(format!("release {source_channel}/{version} not found")));
+            return Err(UdsError::NotFound(format!(
+                "release {source_channel}/{version} not found"
+            )));
         }
         if target.exists() {
-            return Err(UdsError::Conflict(format!("release {target_channel}/{version} already exists")));
+            return Err(UdsError::Conflict(format!(
+                "release {target_channel}/{version} already exists"
+            )));
         }
 
         copy_dir_all(&source, &target).await?;
         let mut manifest = self.load_manifest(target_channel, &version).await?;
         manifest.updated_at = OffsetDateTime::now_utc();
-        self.save_manifest(target_channel, &version, &manifest).await?;
+        self.save_manifest(target_channel, &version, &manifest)
+            .await?;
         Ok(manifest)
     }
 
-    pub async fn update_for(&self, channel: &str, target: &str, arch: &str, current_version: &str) -> Result<Option<TauriUpdateResponse>> {
+    pub async fn update_for(
+        &self,
+        channel: &str,
+        target: &str,
+        arch: &str,
+        current_version: &str,
+    ) -> Result<Option<TauriUpdateResponse>> {
         validate_path_segment(channel, "channel")?;
         validate_path_segment(target, "target")?;
         validate_path_segment(arch, "arch")?;
@@ -147,10 +178,15 @@ impl Storage {
         let artifact = offered_manifest
             .platforms
             .get(&platform_key)
-            .ok_or_else(|| UdsError::Storage("selected release is missing its platform artifact".to_string()))?;
+            .ok_or_else(|| {
+                UdsError::Storage("selected release is missing its platform artifact".to_string())
+            })?;
 
         let mut notes = String::new();
-        for (_, manifest) in candidates.iter().filter(|(version, _)| version <= offered_version) {
+        for (_, manifest) in candidates
+            .iter()
+            .filter(|(version, _)| version <= offered_version)
+        {
             if !notes.is_empty() {
                 notes.push_str("\n\n");
             }
@@ -178,18 +214,27 @@ impl Storage {
         }))
     }
 
-    pub async fn artifact_path(&self, channel: &str, version: &str, platform: &str, file_name: &str) -> Result<PathBuf> {
+    pub async fn artifact_path(
+        &self,
+        channel: &str,
+        version: &str,
+        platform: &str,
+        file_name: &str,
+    ) -> Result<PathBuf> {
         validate_path_segment(channel, "channel")?;
         validate_platform_key(platform)?;
         validate_path_segment(file_name, "file_name")?;
         let version = normalize_version(version)?;
         let manifest = self.load_manifest(channel, &version).await?;
-        let artifact = manifest
-            .platforms
-            .get(platform)
-            .ok_or_else(|| UdsError::NotFound(format!("platform {platform} not found for release {channel}/{version}")))?;
+        let artifact = manifest.platforms.get(platform).ok_or_else(|| {
+            UdsError::NotFound(format!(
+                "platform {platform} not found for release {channel}/{version}"
+            ))
+        })?;
         if artifact.file_name != file_name {
-            return Err(UdsError::NotFound(format!("artifact {file_name} not found")));
+            return Err(UdsError::NotFound(format!(
+                "artifact {file_name} not found"
+            )));
         }
         Ok(self.release_dir(channel, &version).join(file_name))
     }
@@ -244,7 +289,11 @@ impl Storage {
             }
         }
 
-        entries.sort_by(|left, right| left.channel.cmp(&right.channel).then(left.version.cmp(&right.version)));
+        entries.sort_by(|left, right| {
+            left.channel
+                .cmp(&right.channel)
+                .then(left.version.cmp(&right.version))
+        });
         Ok(CatalogResponse { entries })
     }
 
@@ -278,13 +327,20 @@ impl Storage {
         let version = normalize_version(version)?;
         let path = self.manifest_path(channel, &version);
         if !path.exists() {
-            return Err(UdsError::NotFound(format!("release {channel}/{version} not found")));
+            return Err(UdsError::NotFound(format!(
+                "release {channel}/{version} not found"
+            )));
         }
         let text = fs::read_to_string(path).await?;
         Ok(serde_json::from_str(&text)?)
     }
 
-    async fn save_manifest(&self, channel: &str, version: &str, manifest: &ReleaseManifest) -> Result<()> {
+    async fn save_manifest(
+        &self,
+        channel: &str,
+        version: &str,
+        manifest: &ReleaseManifest,
+    ) -> Result<()> {
         let release_dir = self.release_dir(channel, version);
         fs::create_dir_all(&release_dir).await?;
         let tmp_path = release_dir.join("manifest.json.tmp");
@@ -315,8 +371,15 @@ fn normalize_version(version: &str) -> Result<String> {
 }
 
 fn validate_path_segment(value: &str, name: &str) -> Result<()> {
-    if value.is_empty() || value.contains('/') || value.contains('\\') || value == "." || value == ".." {
-        return Err(UdsError::BadRequest(format!("{name} is not a safe path segment")));
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value == "."
+        || value == ".."
+    {
+        return Err(UdsError::BadRequest(format!(
+            "{name} is not a safe path segment"
+        )));
     }
     Ok(())
 }
@@ -324,7 +387,9 @@ fn validate_path_segment(value: &str, name: &str) -> Result<()> {
 fn validate_platform_key(value: &str) -> Result<()> {
     validate_path_segment(value, "platform")?;
     if !value.contains('-') {
-        return Err(UdsError::BadRequest("platform must use the target-arch form".to_string()));
+        return Err(UdsError::BadRequest(
+            "platform must use the target-arch form".to_string(),
+        ));
     }
     Ok(())
 }
@@ -357,7 +422,12 @@ mod tests {
     #[tokio::test]
     async fn update_notes_include_all_versions_after_current_version() {
         let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::new(temp.path().to_path_buf(), "https://updates.example.test".to_string()).await.unwrap();
+        let storage = Storage::new(
+            temp.path().to_path_buf(),
+            "https://updates.example.test".to_string(),
+        )
+        .await
+        .unwrap();
 
         for version in ["26.6.0", "26.7.0", "26.7.2"] {
             let mut platforms = BTreeMap::new();
@@ -386,7 +456,11 @@ mod tests {
                 .unwrap();
         }
 
-        let update = storage.update_for("stable", "windows", "x86_64", "26.5.5").await.unwrap().unwrap();
+        let update = storage
+            .update_for("stable", "windows", "x86_64", "26.5.5")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(update.version, "26.7.2");
         assert!(update.notes.contains("Changed in 26.6.0"));
         assert!(update.notes.contains("Changed in 26.7.0"));
@@ -396,7 +470,12 @@ mod tests {
     #[tokio::test]
     async fn release_list_is_sorted_newest_first() {
         let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::new(temp.path().to_path_buf(), "https://updates.example.test".to_string()).await.unwrap();
+        let storage = Storage::new(
+            temp.path().to_path_buf(),
+            "https://updates.example.test".to_string(),
+        )
+        .await
+        .unwrap();
 
         for version in ["26.6.0", "26.7.2", "26.7.0"] {
             let mut platforms = BTreeMap::new();
@@ -426,7 +505,11 @@ mod tests {
         }
 
         let response = storage.release_list("stable").await.unwrap();
-        let versions = response.releases.into_iter().map(|release| release.version).collect::<Vec<_>>();
+        let versions = response
+            .releases
+            .into_iter()
+            .map(|release| release.version)
+            .collect::<Vec<_>>();
         assert_eq!(versions, vec!["26.7.2", "26.7.0", "26.6.0"]);
     }
 }

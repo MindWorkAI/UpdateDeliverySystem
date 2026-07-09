@@ -1,19 +1,20 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as FmtWrite};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
+use flexi_logger::writers::{ArcFileLogWriter, FileLogWriter, FileLogWriterHandle};
+use flexi_logger::{Cleanup, Criterion, FileSpec, Naming};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use time::OffsetDateTime;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
-use tracing_subscriber::fmt::{FmtContext, FormattedFields, MakeWriter};
+use tracing_subscriber::fmt::{FmtContext, FormattedFields};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -22,7 +23,8 @@ use tracing_subscriber::{EnvFilter, Registry};
 use crate::config::{LogLevel, LoggingColorMode, ServerConfig};
 use crate::errors::{Result, UdsError};
 
-const TIMESTAMP_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
+const TIMESTAMP_FORMAT: &[FormatItem<'_>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
 const NOISY_TARGETS: &[&str] = &[
     "h2",
     "hyper",
@@ -36,9 +38,9 @@ const NOISY_TARGETS: &[&str] = &[
     "reqwest",
 ];
 
-#[derive(Debug, Clone)]
 pub struct LoggingRuntime {
     active_file_path: Option<PathBuf>,
+    _file_log_handle: Option<FileLogWriterHandle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,23 +69,28 @@ pub fn init_server_logging(config: &ServerConfig) -> Result<LoggingRuntime> {
             .with_writer(io::stdout)
     });
 
-    let file_layer = if config.logging.file.enabled {
-        let path = file_path
-            .clone()
-            .ok_or_else(|| UdsError::Config("logging file path could not be resolved".to_string()))?;
-        let writer = RotatingFileMakeWriter::new(
-            path,
-            config.logging.file.max_size_mb * 1024 * 1024,
+    let (file_layer, file_log_handle, active_file_path) = if config.logging.file.enabled {
+        let base_path = file_path.clone().ok_or_else(|| {
+            UdsError::Config("logging file path could not be resolved".to_string())
+        })?;
+        let (writer, handle, active_path) = build_file_log_writer(
+            &base_path,
+            config.logging.file.max_size_mb,
             config.logging.file.max_archived_files,
         )?;
-        Some(
-            tracing_subscriber::fmt::layer()
-                .event_format(UdsEventFormatter { color: false })
-                .fmt_fields(UdsFieldFormatter)
-                .with_writer(writer),
+        let file_writer = writer.clone();
+        (
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .event_format(UdsEventFormatter { color: false })
+                    .fmt_fields(UdsFieldFormatter)
+                    .with_writer(move || file_writer.clone()),
+            ),
+            Some(handle),
+            Some(active_path),
         )
     } else {
-        None
+        (None, None, None)
     };
 
     Registry::default()
@@ -94,15 +101,18 @@ pub fn init_server_logging(config: &ServerConfig) -> Result<LoggingRuntime> {
         .map_err(|error| UdsError::Config(format!("failed to initialize logging: {error}")))?;
 
     Ok(LoggingRuntime {
-        active_file_path: file_path,
+        active_file_path,
+        _file_log_handle: file_log_handle,
     })
 }
 
 pub fn init_client_logging() -> Result<()> {
     let filter = if let Ok(filter) = std::env::var("RUST_LOG") {
-        EnvFilter::try_new(filter).map_err(|error| UdsError::Config(format!("invalid RUST_LOG filter: {error}")))?
+        EnvFilter::try_new(filter)
+            .map_err(|error| UdsError::Config(format!("invalid RUST_LOG filter: {error}")))?
     } else {
-        EnvFilter::try_new("warn").map_err(|error| UdsError::Config(format!("invalid client log filter: {error}")))?
+        EnvFilter::try_new("warn")
+            .map_err(|error| UdsError::Config(format!("invalid client log filter: {error}")))?
     };
 
     let color = io::stdout().is_terminal();
@@ -115,7 +125,9 @@ pub fn init_client_logging() -> Result<()> {
                 .with_writer(io::stdout),
         )
         .try_init()
-        .map_err(|error| UdsError::Config(format!("failed to initialize client logging: {error}")))?;
+        .map_err(|error| {
+            UdsError::Config(format!("failed to initialize client logging: {error}"))
+        })?;
     Ok(())
 }
 
@@ -133,9 +145,32 @@ pub fn effective_log_file_path(config: &ServerConfig) -> Option<PathBuf> {
     )
 }
 
+fn build_file_log_writer(
+    base_path: &Path,
+    max_size_mb: u64,
+    max_archived_files: usize,
+) -> Result<(ArcFileLogWriter, FileLogWriterHandle, PathBuf)> {
+    let file_spec = FileSpec::try_from(base_path.to_path_buf())
+        .map_err(|error| UdsError::Config(format!("invalid logging file path: {error}")))?;
+    let active_path = file_spec.as_pathbuf(Some("rCURRENT"));
+    let (writer, handle) = FileLogWriter::builder(file_spec)
+        .append()
+        .use_utc()
+        .rotate(
+            Criterion::Size(max_size_mb * 1024 * 1024),
+            Naming::Numbers,
+            Cleanup::KeepLogFiles(max_archived_files),
+        )
+        .try_build_with_handle()
+        .map_err(|error| UdsError::Config(format!("failed to initialize file logging: {error}")))?;
+
+    Ok((writer, handle, active_path))
+}
+
 pub fn build_env_filter(level: &str, configured_filter: &str) -> Result<EnvFilter> {
     if let Ok(filter) = std::env::var("RUST_LOG") {
-        return EnvFilter::try_new(filter).map_err(|error| UdsError::Config(format!("invalid RUST_LOG filter: {error}")));
+        return EnvFilter::try_new(filter)
+            .map_err(|error| UdsError::Config(format!("invalid RUST_LOG filter: {error}")));
     }
 
     let mut filter = String::new();
@@ -150,7 +185,8 @@ pub fn build_env_filter(level: &str, configured_filter: &str) -> Result<EnvFilte
         filter.push_str(configured_filter.trim());
     }
 
-    EnvFilter::try_new(filter).map_err(|error| UdsError::Config(format!("invalid logging filter: {error}")))
+    EnvFilter::try_new(filter)
+        .map_err(|error| UdsError::Config(format!("invalid logging filter: {error}")))
 }
 
 impl LoggingRuntime {
@@ -169,7 +205,12 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'writer> FormatFields<'writer> + 'static,
 {
-    fn format_event(&self, _ctx: &FmtContext<'_, S, N>, mut writer: Writer<'_>, event: &Event<'_>) -> fmt::Result {
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
         let metadata = event.metadata();
         let mut visitor = EventFieldVisitor::default();
         event.record(&mut visitor);
@@ -181,9 +222,21 @@ where
         let level_text = level.as_str();
 
         if self.color {
-            write!(writer, "[{}] {} [{}] ", colorize(&timestamp, level), colorize(level_text, level), metadata.target())?;
+            write!(
+                writer,
+                "[{}] {} [{}] ",
+                colorize(&timestamp, level),
+                colorize(level_text, level),
+                metadata.target()
+            )?;
         } else {
-            write!(writer, "[{}] {} [{}] ", timestamp, level_text, metadata.target())?;
+            write!(
+                writer,
+                "[{}] {} [{}] ",
+                timestamp,
+                level_text,
+                metadata.target()
+            )?;
         }
 
         if !visitor.fields.is_empty() {
@@ -209,7 +262,11 @@ where
 struct UdsFieldFormatter;
 
 impl<'writer> FormatFields<'writer> for UdsFieldFormatter {
-    fn format_fields<R: tracing_subscriber::field::RecordFields>(&self, mut writer: Writer<'writer>, fields: R) -> fmt::Result {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        mut writer: Writer<'writer>,
+        fields: R,
+    ) -> fmt::Result {
         let mut visitor = EventFieldVisitor::default();
         fields.record(&mut visitor);
         if !visitor.message.is_empty() {
@@ -266,107 +323,6 @@ impl EventFieldVisitor {
     }
 }
 
-#[derive(Clone)]
-pub struct RotatingFileMakeWriter {
-    inner: Arc<Mutex<RotatingFileState>>,
-}
-
-impl RotatingFileMakeWriter {
-    pub fn new(path: PathBuf, max_size_bytes: u64, max_archived_files: usize) -> Result<Self> {
-        if max_size_bytes == 0 {
-            return Err(UdsError::Config("max_size_bytes must be greater than 0".to_string()));
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        let current_size = file.metadata()?.len();
-        Ok(Self {
-            inner: Arc::new(Mutex::new(RotatingFileState {
-                path,
-                file,
-                current_size,
-                max_size_bytes,
-                max_archived_files,
-            })),
-        })
-    }
-}
-
-impl<'a> MakeWriter<'a> for RotatingFileMakeWriter {
-    type Writer = RotatingFileGuard;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        RotatingFileGuard {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-pub struct RotatingFileGuard {
-    inner: Arc<Mutex<RotatingFileState>>,
-}
-
-impl Write for RotatingFileGuard {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut state = self.inner.lock().map_err(|_| io::Error::other("log writer mutex poisoned"))?;
-        state.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut state = self.inner.lock().map_err(|_| io::Error::other("log writer mutex poisoned"))?;
-        state.file.flush()
-    }
-}
-
-struct RotatingFileState {
-    path: PathBuf,
-    file: std::fs::File,
-    current_size: u64,
-    max_size_bytes: u64,
-    max_archived_files: usize,
-}
-
-impl RotatingFileState {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.current_size > 0 && self.current_size.saturating_add(buf.len() as u64) > self.max_size_bytes {
-            self.rotate()?;
-        }
-        let written = self.file.write(buf)?;
-        self.current_size += written as u64;
-        Ok(written)
-    }
-
-    fn rotate(&mut self) -> io::Result<()> {
-        self.file.flush()?;
-        if self.max_archived_files == 0 {
-            let _ = std::fs::remove_file(&self.path);
-        } else {
-            let oldest = archive_path(&self.path, self.max_archived_files);
-            let _ = std::fs::remove_file(oldest);
-            for index in (1..self.max_archived_files).rev() {
-                let from = archive_path(&self.path, index);
-                let to = archive_path(&self.path, index + 1);
-                if from.exists() {
-                    std::fs::rename(from, to)?;
-                }
-            }
-            if self.path.exists() {
-                std::fs::rename(&self.path, archive_path(&self.path, 1))?;
-            }
-        }
-
-        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
-        self.current_size = 0;
-        Ok(())
-    }
-}
-
-fn archive_path(path: &Path, index: usize) -> PathBuf {
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("events.log");
-    path.with_file_name(format!("{file_name}.{index}"))
-}
-
 pub async fn read_recent_events(path: &Path, lines: usize) -> Result<Vec<LogEventLine>> {
     let content = fs::read_to_string(path).await.unwrap_or_default();
     let mut events = content
@@ -379,7 +335,10 @@ pub async fn read_recent_events(path: &Path, lines: usize) -> Result<Vec<LogEven
     Ok(events)
 }
 
-pub async fn stream_events_from_file(path: PathBuf, lines: usize) -> impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, io::Error>> {
+pub async fn stream_events_from_file(
+    path: PathBuf,
+    lines: usize,
+) -> impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, io::Error>> {
     async_stream::stream! {
         for event in read_recent_events(&path, lines).await.unwrap_or_default() {
             yield Ok(bytes::Bytes::from(ndjson_line(&event)));
@@ -476,7 +435,10 @@ pub fn render_log_event(event: &LogEventLine, color: bool) -> String {
         }
         fields.push(']');
     }
-    let line = format!("[{}] {} [{}]{} {}", event.timestamp, level, event.target, fields, event.message);
+    let line = format!(
+        "[{}] {} [{}]{} {}",
+        event.timestamp, level, event.target, fields, event.message
+    );
     if color {
         colorize_for_log_level(&line, event.level)
     } else {
@@ -553,15 +515,14 @@ mod tests {
     }
 
     #[test]
-    fn rotating_writer_rotates_when_size_limit_is_reached() {
+    fn flexi_logger_current_path_uses_stable_rotation_infix() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("events.log");
-        let writer = RotatingFileMakeWriter::new(path.clone(), 10, 2).unwrap();
-        let mut guard = writer.make_writer();
-        guard.write_all(b"123456789\n").unwrap();
-        guard.write_all(b"abcdef\n").unwrap();
-        guard.flush().unwrap();
-        assert!(path.exists());
-        assert!(archive_path(&path, 1).exists());
+        let (writer, _handle, active_path) = build_file_log_writer(&path, 1, 2).unwrap();
+        let mut writer = writer.clone();
+        std::io::Write::write_all(&mut writer, b"hello\n").unwrap();
+        std::io::Write::flush(&mut writer).unwrap();
+        assert_eq!(active_path, temp.path().join("events_rCURRENT.log"));
+        assert!(active_path.exists());
     }
 }

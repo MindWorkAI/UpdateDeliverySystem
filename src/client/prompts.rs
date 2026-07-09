@@ -7,6 +7,7 @@ use crate::client::config::{ClientConfig, ClientProfile, load_or_default, save};
 use crate::client::import::{PreparedUpload, prepare_from_local, prepare_from_remote};
 use crate::config::ClientCommand;
 use crate::errors::{Result, UdsError};
+use crate::logging::{color_enabled, render_log_event, should_display_level};
 use crate::models::ReleaseListEntry;
 
 pub async fn run(command: Option<ClientCommand>) -> Result<()> {
@@ -17,6 +18,7 @@ pub async fn run(command: Option<ClientCommand>) -> Result<()> {
         Some(ClientCommand::Copy) => copy().await,
         Some(ClientCommand::Changelog) => changelog().await,
         Some(ClientCommand::Stats) => stats().await,
+        Some(ClientCommand::Logs { follow, lines, level, no_color }) => logs(follow, lines, level, no_color).await,
         None => main_menu().await,
     }
 }
@@ -30,6 +32,7 @@ async fn main_menu() -> Result<()> {
             MenuAction::Copy,
             MenuAction::Changelog,
             MenuAction::Stats,
+            MenuAction::Logs,
             MenuAction::Configure,
         ],
     )
@@ -43,6 +46,7 @@ async fn main_menu() -> Result<()> {
         MenuAction::Copy => copy().await,
         MenuAction::Changelog => changelog().await,
         MenuAction::Stats => stats().await,
+        MenuAction::Logs => logs(false, 200, None, false).await,
     }
 }
 
@@ -201,6 +205,29 @@ async fn stats() -> Result<()> {
     Ok(())
 }
 
+async fn logs(follow: bool, lines: usize, level: Option<crate::config::LogLevel>, no_color: bool) -> Result<()> {
+    let (_config, _profile_name, profile) = load_profile_or_configure().await?;
+    let client = AdminClient::new(&profile)?;
+    let color = color_enabled(no_color);
+
+    if follow {
+        client
+            .stream_logs(lines, |event| {
+                if should_display_level(event.level, level) {
+                    println!("{}", render_log_event(&event, color));
+                }
+            })
+            .await
+    } else {
+        for event in client.recent_logs(lines).await? {
+            if should_display_level(event.level, level) {
+                println!("{}", render_log_event(&event, color));
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn load_profile_or_configure() -> Result<(ClientConfig, String, ClientProfile)> {
     let config = load_or_default().await?;
     if config.profiles.is_empty() {
@@ -290,6 +317,7 @@ enum MenuAction {
     Copy,
     Changelog,
     Stats,
+    Logs,
 }
 
 impl std::fmt::Display for MenuAction {
@@ -301,6 +329,7 @@ impl std::fmt::Display for MenuAction {
             MenuAction::Copy => write!(formatter, "Copy release"),
             MenuAction::Changelog => write!(formatter, "Correct changelog"),
             MenuAction::Stats => write!(formatter, "Show statistics"),
+            MenuAction::Logs => write!(formatter, "Show logs"),
         }
     }
 }

@@ -1,10 +1,12 @@
 use std::path::Path;
 
+use futures_util::StreamExt;
 use reqwest::multipart::{Form, Part};
 
 use crate::client::config::ClientProfile;
 use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
+use crate::logging::LogEventLine;
 use crate::models::{ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse};
 use crate::stats::ChannelStats;
 
@@ -86,6 +88,49 @@ impl AdminClient {
         self.get_json(&format!("/admin/v1/channels/{channel}/stats")).await
     }
 
+    pub async fn recent_logs(&self, lines: usize) -> Result<Vec<LogEventLine>> {
+        let text = self.get_text(&format!("/admin/v1/logs/recent?lines={lines}")).await?;
+        parse_ndjson_events(&text)
+    }
+
+    pub async fn stream_logs<F>(&self, lines: usize, mut on_event: F) -> Result<()>
+    where
+        F: FnMut(LogEventLine),
+    {
+        let response = self
+            .http
+            .get(self.url(&format!("/admin/v1/logs/stream?lines={lines}")))
+            .bearer_auth(&self.admin_token)
+            .send()
+            .await
+            .map_err(|error| UdsError::Storage(format!("log stream request failed: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response
+                .text()
+                .await
+                .map_err(|error| UdsError::Storage(format!("failed to read log stream error body: {error}")))?;
+            return Err(UdsError::Storage(format!("UDS returned HTTP {status}: {text}")));
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| UdsError::Storage(format!("log stream failed: {error}")))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(index) = buffer.find('\n') {
+                let line = buffer[..index].trim().to_string();
+                buffer.drain(..=index);
+                if line.is_empty() {
+                    continue;
+                }
+                let event = serde_json::from_str::<LogEventLine>(&line)?;
+                on_event(event);
+            }
+        }
+        Ok(())
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let response = self
             .http
@@ -95,6 +140,17 @@ impl AdminClient {
             .await
             .map_err(|error| UdsError::Storage(format!("request failed: {error}")))?;
         parse_json_response(response).await
+    }
+
+    async fn get_text(&self, path: &str) -> Result<String> {
+        let response = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.admin_token)
+            .send()
+            .await
+            .map_err(|error| UdsError::Storage(format!("request failed: {error}")))?;
+        parse_text_response(response).await
     }
 
     async fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
@@ -131,6 +187,11 @@ pub fn display_path(path: &Path) -> String {
 }
 
 async fn parse_json_response<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let text = parse_text_response(response).await?;
+    serde_json::from_str(&text).map_err(UdsError::Json)
+}
+
+async fn parse_text_response(response: reqwest::Response) -> Result<String> {
     let status = response.status();
     let text = response
         .text()
@@ -139,5 +200,12 @@ async fn parse_json_response<T: serde::de::DeserializeOwned>(response: reqwest::
     if !status.is_success() {
         return Err(UdsError::Storage(format!("UDS returned HTTP {status}: {text}")));
     }
-    serde_json::from_str(&text).map_err(UdsError::Json)
+    Ok(text)
+}
+
+fn parse_ndjson_events(text: &str) -> Result<Vec<LogEventLine>> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<LogEventLine>(line).map_err(UdsError::Json))
+        .collect()
 }

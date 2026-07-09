@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::cluster::ClusterState;
 use crate::config::{ServerConfig, ServerMode};
 use crate::errors::{Result, UdsError};
+use crate::logging::{LoggingRuntime, events_to_ndjson, read_recent_events, stream_events_from_file};
 use crate::models::{
     CatalogResponse, ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseUploadMetadata, ReplicationEvent,
     ReplicationEventType,
@@ -29,6 +30,7 @@ pub struct AppState {
     pub storage: Arc<Storage>,
     pub stats: Arc<StatsRecorder>,
     pub cluster: ClusterState,
+    pub logging: Arc<LoggingRuntime>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -41,6 +43,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/v1/channels/{channel}/releases/{version}", delete(withdraw_release))
         .route("/admin/v1/channels/{target_channel}/copy", post(copy_release))
         .route("/admin/v1/channels/{channel}/stats", get(channel_stats));
+
+    if state.config.logging.admin_api.enabled && state.config.logging.file.enabled {
+        router = router
+            .route("/admin/v1/logs/recent", get(recent_logs))
+            .route("/admin/v1/logs/stream", get(stream_logs));
+    }
 
     if state.config.mode == ServerMode::Fleet {
         router = router
@@ -217,6 +225,41 @@ async fn copy_release(
 async fn channel_stats(State(state): State<AppState>, _auth: AdminAuth, Path(channel): Path<String>) -> Result<Json<ChannelStats>> {
     require_allowed_channel(&state, &channel)?;
     Ok(Json(state.stats.channel_stats(&channel).await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LogQuery {
+    lines: Option<usize>,
+}
+
+async fn recent_logs(State(state): State<AppState>, _auth: AdminAuth, Query(query): Query<LogQuery>) -> Result<Response> {
+    let path = state
+        .logging
+        .active_file_path()
+        .ok_or_else(|| UdsError::Config("file logging is disabled".to_string()))?;
+    let events = read_recent_events(path, query.lines.unwrap_or(200).min(10_000)).await?;
+    let body = events_to_ndjson(&events)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
+        .into_response())
+}
+
+async fn stream_logs(State(state): State<AppState>, _auth: AdminAuth, Query(query): Query<LogQuery>) -> Result<Response> {
+    let path = state
+        .logging
+        .active_file_path()
+        .ok_or_else(|| UdsError::Config("file logging is disabled".to_string()))?
+        .to_path_buf();
+    let stream = stream_events_from_file(path, query.lines.unwrap_or(100).min(10_000)).await;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        Body::from_stream(stream),
+    )
+        .into_response())
 }
 
 async fn catalog(State(state): State<AppState>, _auth: ClusterAuth) -> Result<Json<CatalogResponse>> {

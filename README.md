@@ -53,6 +53,23 @@ node_id_path = "node-id"
 broadcast_addr = "255.255.255.255:44231"
 broadcast_interval_seconds = 30
 reconcile_interval_seconds = 300
+
+[logging]
+level = "info"
+filter = ""
+
+[logging.console]
+enabled = true
+color = "auto"
+
+[logging.file]
+enabled = true
+path = "/var/log/mindwork-ai/uds/events.log"
+max_size_mb = 100
+max_archived_files = 5
+
+[logging.admin_api]
+enabled = true
 ```
 
 ### Modes
@@ -133,6 +150,7 @@ uds client changelog
 uds client withdraw
 uds client copy
 uds client stats
+uds client logs
 ```
 
 The first client run offers to create a local profile. The profile stores the UDS base URL, admin token, and default channel in a user-local config file. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
@@ -199,6 +217,18 @@ uds client stats
 
 Statistics include update checks, downloads, estimated traffic, and per-platform counters. Single-node mode returns local statistics. Fleet mode keeps the same API and is designed to aggregate peer statistics.
 
+### View Logs
+
+```bash
+uds client logs
+uds client logs --follow
+uds client logs --lines 500
+uds client logs --level warn
+uds client logs --no-color
+```
+
+The log viewer streams logs from the Admin API and colorizes them locally when the client is attached to an interactive terminal. UDS never writes ANSI color codes to journald or log files.
+
 ## Administration API Reference
 
 The client uses the following Admin API endpoints. All administration requests require `Authorization: Bearer <admin_token>`.
@@ -209,6 +239,65 @@ The client uses the following Admin API endpoints. All administration requests r
 - `DELETE /admin/v1/channels/{channel}/releases/{version}`
 - `POST /admin/v1/channels/{target_channel}/copy`
 - `GET /admin/v1/channels/{channel}/stats`
+- `GET /admin/v1/logs/recent?lines=200`
+- `GET /admin/v1/logs/stream?lines=100`
+
+Log API responses use newline-delimited JSON (`application/x-ndjson`) and require file logging plus `logging.admin_api.enabled = true`.
+
+## Logging
+
+UDS uses UTC timestamps and a log layout inspired by the MindWork AI Studio runtime:
+
+```text
+[2026-07-08 12:00:00.001] INFO [update_delivery_system::tls] [bind = 0.0.0.0:443] starting HTTPS server with file-based TLS
+```
+
+Systemd and file logs are intentionally colorless. Terminal colors are only used when `logging.console.color = "always"` or when `color = "auto"` and stdout is an interactive terminal.
+
+The default production log file path is:
+
+```text
+/var/log/mindwork-ai/uds/events.log
+```
+
+The active file is rotated before it exceeds `logging.file.max_size_mb`, which defaults to 100 MB. Archives are named `events.log.1`, `events.log.2`, and so on up to `logging.file.max_archived_files`.
+
+When UDS runs as a systemd service, systemd captures stdout and stderr automatically. Admins can inspect local service logs with:
+
+```bash
+journalctl -u uds -f
+```
+
+For remote or colorized log viewing, use:
+
+```bash
+uds client logs --follow
+```
+
+Normal systemd services cannot be attached to like `docker attach`, because stdout and stderr are connected when the service starts. UDS therefore keeps journald clean and provides colored viewing through the client.
+
+Example systemd unit:
+
+```ini
+[Unit]
+Description=MindWork AI Studio Update Delivery System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uds
+Group=uds
+ExecStart=/usr/local/bin/uds --config /etc/uds/config.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+ReadWritePaths=/var/lib/uds /var/log/mindwork-ai/uds
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ## Fleet Operation
 

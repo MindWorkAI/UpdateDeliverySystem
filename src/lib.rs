@@ -7,6 +7,7 @@ pub mod cluster;
 pub mod client;
 pub mod config;
 pub mod errors;
+pub mod logging;
 pub mod models;
 pub mod routes;
 pub mod security;

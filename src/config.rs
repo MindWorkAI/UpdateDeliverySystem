@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, UdsError};
@@ -50,6 +50,35 @@ pub enum ClientCommand {
 
     /// Show channel statistics.
     Stats,
+
+    /// Show UDS service logs.
+    Logs {
+        /// Follow appended log events.
+        #[arg(long)]
+        follow: bool,
+
+        /// Number of recent log lines to show first.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+
+        /// Minimum level to display locally.
+        #[arg(long)]
+        level: Option<LogLevel>,
+
+        /// Disable local terminal colors.
+        #[arg(long)]
+        no_color: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +119,9 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub cluster: ClusterConfig,
+
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +160,68 @@ pub struct ClusterConfig {
     pub reconcile_interval_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    #[serde(default)]
+    pub filter: String,
+
+    #[serde(default)]
+    pub console: LoggingConsoleConfig,
+
+    #[serde(default)]
+    pub file: LoggingFileConfig,
+
+    #[serde(default)]
+    pub admin_api: LoggingAdminApiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConsoleConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub color: LoggingColorMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingFileConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+
+    #[serde(default = "default_max_log_size_mb")]
+    pub max_size_mb: u64,
+
+    #[serde(default = "default_max_archived_log_files")]
+    pub max_archived_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingAdminApiConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoggingColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl Default for LoggingColorMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 impl Default for TlsConfig {
     fn default() -> Self {
         Self {
@@ -149,6 +243,44 @@ impl Default for ClusterConfig {
             broadcast_interval_seconds: default_broadcast_interval_seconds(),
             reconcile_interval_seconds: default_reconcile_interval_seconds(),
         }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            filter: String::new(),
+            console: LoggingConsoleConfig::default(),
+            file: LoggingFileConfig::default(),
+            admin_api: LoggingAdminApiConfig::default(),
+        }
+    }
+}
+
+impl Default for LoggingConsoleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            color: LoggingColorMode::Auto,
+        }
+    }
+}
+
+impl Default for LoggingFileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            max_size_mb: default_max_log_size_mb(),
+            max_archived_files: default_max_archived_log_files(),
+        }
+    }
+}
+
+impl Default for LoggingAdminApiConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -180,6 +312,7 @@ impl ServerConfig {
             channels: default_channels(),
             tls: TlsConfig::default(),
             cluster: ClusterConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 
@@ -214,6 +347,13 @@ impl ServerConfig {
                     return Err(UdsError::Config("tls.acme_contact_email is required in ACME mode".to_string()));
                 }
             }
+        }
+
+        if self.logging.level.trim().is_empty() {
+            return Err(UdsError::Config("logging.level must not be empty".to_string()));
+        }
+        if self.logging.file.enabled && self.logging.file.max_size_mb == 0 {
+            return Err(UdsError::Config("logging.file.max_size_mb must be greater than 0".to_string()));
         }
 
         Ok(())
@@ -265,6 +405,22 @@ fn default_broadcast_interval_seconds() -> u64 {
 
 fn default_reconcile_interval_seconds() -> u64 {
     300
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_log_size_mb() -> u64 {
+    100
+}
+
+fn default_max_archived_log_files() -> usize {
+    5
 }
 
 #[cfg(test)]

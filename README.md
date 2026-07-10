@@ -18,7 +18,7 @@ bind = "0.0.0.0:8080"
 public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
 admin_token = "replace-with-a-long-random-admin-token"
-channels = ["stable", "beta", "experimental", "lts"]
+channels = ["stable", "beta", "experimental", "mature"]
 
 [tls]
 mode = "off"
@@ -41,7 +41,7 @@ public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
 admin_token = "replace-with-a-long-random-admin-token"
 cluster_token = "replace-with-a-long-random-cluster-token"
-channels = ["stable", "beta", "experimental", "lts"]
+channels = ["stable", "beta", "experimental", "mature"]
 
 [tls]
 mode = "files"
@@ -90,6 +90,13 @@ rollup_interval_seconds = 900
 - `fleet`: enables the internal fleet shape and background broadcast task. This mode requires `cluster_token`.
 
 The CLI flag `--single-node-mode` overrides the configuration file and forces single-node mode.
+
+### Release Channels
+
+- `stable`: the current release recommended for most installations.
+- `mature`: an older, field-tested release for environments that prioritize reliability over receiving updates quickly. This channel does not provide long-term support, a guaranteed support period, or an extended maintenance commitment.
+- `beta`: a preview of an upcoming stable release.
+- `experimental`: early releases intended for testing new or potentially disruptive changes.
 
 ### TLS Modes
 

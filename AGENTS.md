@@ -5,7 +5,7 @@ The Update Delivery System (UDS) is a Rust-based system for globally distributin
 The UDS has both public and private endpoints, which are secured with a private token.
 
 ## Public Endpoints:
-API as intended by Tauri v2 in order to distribute updates. We want to support different channels, such as `stable`, `beta`, `experimental`, or `lts`.
+API as intended by Tauri v2 in order to distribute updates. We want to support different channels, such as `stable`, `beta`, `experimental`, or `mature`. The `mature` channel contains older, field-tested releases for environments that prioritize reliability over receiving updates quickly; it does not imply long-term support or an extended maintenance commitment.
 
 ## Private Admin Endpoints with Secret Token
 - Upload a new release for a channel. Due to load balancing, only one UDS node will receive this call. It must then communicate with all others in the private network (broadcast?) and replicate the update to all nodes.

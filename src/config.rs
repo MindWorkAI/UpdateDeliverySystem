@@ -518,7 +518,7 @@ fn default_bind() -> SocketAddr {
 }
 
 fn default_channels() -> BTreeSet<String> {
-    ["stable", "beta", "experimental", "lts"]
+    ["stable", "beta", "experimental", "mature"]
         .into_iter()
         .map(str::to_string)
         .collect()

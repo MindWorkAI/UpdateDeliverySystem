@@ -125,3 +125,11 @@ pub struct MutationResponse {
     pub version: String,
     pub replicated: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadPolicy {
+    pub max_artifact_bytes: u64,
+    pub max_total_artifact_bytes: u64,
+    pub max_metadata_bytes: u64,
+    pub max_platforms: usize,
+}

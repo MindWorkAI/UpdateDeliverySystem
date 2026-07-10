@@ -18,7 +18,12 @@ pub async fn run(command: Option<ClientCommand>) -> Result<()> {
         Some(ClientCommand::Copy) => copy().await,
         Some(ClientCommand::Changelog) => changelog().await,
         Some(ClientCommand::Stats) => stats().await,
-        Some(ClientCommand::Logs { follow, lines, level, no_color }) => logs(follow, lines, level, no_color).await,
+        Some(ClientCommand::Logs {
+            follow,
+            lines,
+            level,
+            no_color,
+        }) => logs(follow, lines, level, no_color).await,
         None => main_menu().await,
     }
 }
@@ -52,13 +57,18 @@ async fn main_menu() -> Result<()> {
 
 async fn configure() -> Result<()> {
     let mut config = load_or_default().await?;
-    let default_name = config.active_profile.clone().unwrap_or_else(|| "default".to_string());
+    let default_name = config
+        .active_profile
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let profile_name = Text::new("Profile name:")
         .with_default(&default_name)
         .prompt()
         .map_err(prompt_error)?;
     let existing = config.profiles.get(&profile_name);
-    let default_url = existing.map(|profile| profile.base_url.as_str()).unwrap_or("https://updates.example.org");
+    let default_url = existing
+        .map(|profile| profile.base_url.as_str())
+        .unwrap_or("https://updates.example.org");
     let base_url = Text::new("UDS base URL:")
         .with_default(default_url)
         .prompt()
@@ -68,7 +78,11 @@ async fn configure() -> Result<()> {
         .prompt()
         .map_err(prompt_error)?;
     let default_channel = Text::new("Default channel:")
-        .with_default(existing.and_then(|profile| profile.default_channel.as_deref()).unwrap_or("stable"))
+        .with_default(
+            existing
+                .and_then(|profile| profile.default_channel.as_deref())
+                .unwrap_or("stable"),
+        )
         .prompt()
         .map_err(prompt_error)?;
 
@@ -89,23 +103,36 @@ async fn configure() -> Result<()> {
 async fn upload() -> Result<()> {
     let (_config, _profile_name, profile) = load_profile_or_configure().await?;
     let client = AdminClient::new(&profile)?;
+    let policy = client.upload_policy().await?;
     let channel = prompt_channel(&profile)?;
-    let source = Select::new("Upload source:", vec![UploadSource::GitHubOrUrl, UploadSource::LocalFiles])
-        .prompt()
-        .map_err(prompt_error)?;
+    let source = Select::new(
+        "Upload source:",
+        vec![UploadSource::GitHubOrUrl, UploadSource::LocalFiles],
+    )
+    .prompt()
+    .map_err(prompt_error)?;
 
     let upload = match source {
         UploadSource::GitHubOrUrl => {
-            let url = Text::new("GitHub release URL or latest.json URL:").prompt().map_err(prompt_error)?;
-            prepare_from_remote(&url).await?
+            let url = Text::new("GitHub release URL or latest.json URL:")
+                .prompt()
+                .map_err(prompt_error)?;
+            prepare_from_remote(&url, &policy).await?
         }
         UploadSource::LocalFiles => {
-            let latest_json = Text::new("Path to local latest.json:").prompt().map_err(prompt_error)?;
+            let latest_json = Text::new("Path to local latest.json:")
+                .prompt()
+                .map_err(prompt_error)?;
             let artifact_dir = Text::new("Directory containing referenced artifacts:")
                 .with_default(".")
                 .prompt()
                 .map_err(prompt_error)?;
-            prepare_from_local(&PathBuf::from(latest_json), &PathBuf::from(artifact_dir)).await?
+            prepare_from_local(
+                &PathBuf::from(latest_json),
+                &PathBuf::from(artifact_dir),
+                &policy,
+            )
+            .await?
         }
     };
 
@@ -120,7 +147,10 @@ async fn upload() -> Result<()> {
     }
 
     let response = client.upload_release(&channel, &upload).await?;
-    println!("Uploaded {} to channel '{}'. Replicated: {}", response.version, response.channel, response.replicated);
+    println!(
+        "Uploaded {} to channel '{}'. Replicated: {}",
+        response.version, response.channel, response.replicated
+    );
     Ok(())
 }
 
@@ -129,13 +159,19 @@ async fn withdraw() -> Result<()> {
     let client = AdminClient::new(&profile)?;
     let channel = prompt_channel(&profile)?;
     let release = select_release(&client, &channel).await?;
-    let confirmed = Confirm::new(&format!("Withdraw release {} from channel '{}'?", release.version, channel))
-        .with_default(false)
-        .prompt()
-        .map_err(prompt_error)?;
+    let confirmed = Confirm::new(&format!(
+        "Withdraw release {} from channel '{}'?",
+        release.version, channel
+    ))
+    .with_default(false)
+    .prompt()
+    .map_err(prompt_error)?;
     if confirmed {
         let response = client.withdraw_release(&channel, &release.version).await?;
-        println!("Withdrew {} from channel '{}'. Replicated: {}", response.version, response.channel, response.replicated);
+        println!(
+            "Withdrew {} from channel '{}'. Replicated: {}",
+            response.version, response.channel, response.replicated
+        );
     }
     Ok(())
 }
@@ -145,7 +181,9 @@ async fn copy() -> Result<()> {
     let client = AdminClient::new(&profile)?;
     let source_channel = prompt_channel(&profile)?;
     let release = select_release(&client, &source_channel).await?;
-    let target_channel = Text::new("Target channel:").prompt().map_err(prompt_error)?;
+    let target_channel = Text::new("Target channel:")
+        .prompt()
+        .map_err(prompt_error)?;
     let confirmed = Confirm::new(&format!(
         "Copy release {} from '{}' to '{}'?",
         release.version, source_channel, target_channel
@@ -154,8 +192,13 @@ async fn copy() -> Result<()> {
     .prompt()
     .map_err(prompt_error)?;
     if confirmed {
-        let response = client.copy_release(&source_channel, &target_channel, &release.version).await?;
-        println!("Copied {} to channel '{}'. Replicated: {}", response.version, response.channel, response.replicated);
+        let response = client
+            .copy_release(&source_channel, &target_channel, &release.version)
+            .await?;
+        println!(
+            "Copied {} to channel '{}'. Replicated: {}",
+            response.version, response.channel, response.replicated
+        );
     }
     Ok(())
 }
@@ -181,8 +224,13 @@ async fn changelog() -> Result<()> {
         .prompt()
         .map_err(prompt_error)?;
     if confirmed {
-        let response = client.patch_changelog(&channel, &release.version, notes).await?;
-        println!("Updated changelog for {} in channel '{}'. Replicated: {}", response.version, response.channel, response.replicated);
+        let response = client
+            .patch_changelog(&channel, &release.version, notes)
+            .await?;
+        println!(
+            "Updated changelog for {} in channel '{}'. Replicated: {}",
+            response.version, response.channel, response.replicated
+        );
     }
     Ok(())
 }
@@ -205,7 +253,12 @@ async fn stats() -> Result<()> {
     Ok(())
 }
 
-async fn logs(follow: bool, lines: usize, level: Option<crate::config::LogLevel>, no_color: bool) -> Result<()> {
+async fn logs(
+    follow: bool,
+    lines: usize,
+    level: Option<crate::config::LogLevel>,
+    no_color: bool,
+) -> Result<()> {
     let (_config, _profile_name, profile) = load_profile_or_configure().await?;
     let client = AdminClient::new(&profile)?;
     let color = color_enabled(no_color);
@@ -236,7 +289,9 @@ async fn load_profile_or_configure() -> Result<(ClientConfig, String, ClientProf
             .prompt()
             .map_err(prompt_error)?;
         if !create {
-            return Err(UdsError::Config("client configuration is required".to_string()));
+            return Err(UdsError::Config(
+                "client configuration is required".to_string(),
+            ));
         }
         configure().await?;
     }
@@ -248,13 +303,18 @@ async fn load_profile_or_configure() -> Result<(ClientConfig, String, ClientProf
 
 fn prompt_channel(profile: &ClientProfile) -> Result<String> {
     let default = profile.default_channel.as_deref().unwrap_or("stable");
-    Text::new("Channel:").with_default(default).prompt().map_err(prompt_error)
+    Text::new("Channel:")
+        .with_default(default)
+        .prompt()
+        .map_err(prompt_error)
 }
 
 async fn select_release(client: &AdminClient, channel: &str) -> Result<ReleaseListEntry> {
     let response = client.list_releases(channel).await?;
     if response.releases.is_empty() {
-        return Err(UdsError::NotFound(format!("channel '{channel}' has no releases")));
+        return Err(UdsError::NotFound(format!(
+            "channel '{channel}' has no releases"
+        )));
     }
 
     let choices = response
@@ -262,7 +322,9 @@ async fn select_release(client: &AdminClient, channel: &str) -> Result<ReleaseLi
         .iter()
         .map(format_release_choice)
         .collect::<Vec<_>>();
-    let selected = Select::new("Release:", choices).prompt().map_err(prompt_error)?;
+    let selected = Select::new("Release:", choices)
+        .prompt()
+        .map_err(prompt_error)?;
     response
         .releases
         .into_iter()
@@ -278,7 +340,16 @@ fn print_upload_review(channel: &str, upload: &PreparedUpload) {
         println!("Publication date: {pub_date}");
     }
     println!("Notes preview:");
-    println!("{}", upload.metadata.notes.lines().take(12).collect::<Vec<_>>().join("\n"));
+    println!(
+        "{}",
+        upload
+            .metadata
+            .notes
+            .lines()
+            .take(12)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     println!("\nArtifacts:");
     for artifact in &upload.artifacts {
         println!("- {}", artifact.platform);
@@ -294,7 +365,11 @@ fn print_upload_review(channel: &str, upload: &PreparedUpload) {
 fn format_release_choice(release: &ReleaseListEntry) -> String {
     let withdrawn = if release.withdrawn { " withdrawn" } else { "" };
     let pub_date = release.pub_date.as_deref().unwrap_or("no pub_date");
-    format!("{} ({pub_date}, {} platforms{withdrawn})", release.version, release.platforms.len())
+    format!(
+        "{} ({pub_date}, {} platforms{withdrawn})",
+        release.version,
+        release.platforms.len()
+    )
 }
 
 fn non_empty(value: String) -> Option<String> {

@@ -193,6 +193,14 @@ impl LoggingRuntime {
     pub fn active_file_path(&self) -> Option<&Path> {
         self.active_file_path.as_deref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
+        Self {
+            active_file_path: None,
+            _file_log_handle: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -292,14 +300,6 @@ struct EventFieldVisitor {
 }
 
 impl Visit for EventFieldVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.record_value(field.name(), format!("{value:?}"));
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record_value(field.name(), value.to_string());
-    }
-
     fn record_i64(&mut self, field: &Field, value: i64) {
         self.record_value(field.name(), value.to_string());
     }
@@ -310,6 +310,14 @@ impl Visit for EventFieldVisitor {
 
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.record_value(field.name(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_value(field.name(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.record_value(field.name(), format!("{value:?}"));
     }
 }
 
@@ -403,11 +411,11 @@ pub fn parse_log_line(line: &str) -> Option<LogEventLine> {
     let rest = rest.strip_prefix('[')?;
     let (target, mut rest) = rest.split_once("] ")?;
     let mut fields = BTreeMap::new();
-    if let Some(field_rest) = rest.strip_prefix('[') {
-        if let Some((field_text, message_rest)) = field_rest.split_once("] ") {
-            fields = parse_fields(field_text);
-            rest = message_rest;
-        }
+    if let Some(field_rest) = rest.strip_prefix('[')
+        && let Some((field_text, message_rest)) = field_rest.split_once("] ")
+    {
+        fields = parse_fields(field_text);
+        rest = message_rest;
     }
     Some(LogEventLine {
         timestamp: timestamp.to_string(),

@@ -122,6 +122,42 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub upload: UploadConfig,
+
+    #[serde(default)]
+    pub stats: StatsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadConfig {
+    #[serde(default = "default_max_artifact_size_mb")]
+    pub max_artifact_size_mb: u64,
+
+    #[serde(default = "default_max_total_artifact_size_mb")]
+    pub max_total_artifact_size_mb: u64,
+
+    #[serde(default = "default_max_metadata_size_kb")]
+    pub max_metadata_size_kb: u64,
+
+    #[serde(default = "default_max_platforms")]
+    pub max_platforms: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsConfig {
+    #[serde(default = "default_stats_queue_capacity")]
+    pub queue_capacity: usize,
+
+    #[serde(default = "default_stats_max_pending_events")]
+    pub max_pending_events: usize,
+
+    #[serde(default = "default_stats_rollup_trigger_events")]
+    pub rollup_trigger_events: usize,
+
+    #[serde(default = "default_stats_rollup_interval_seconds")]
+    pub rollup_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,18 +244,13 @@ pub struct LoggingAdminApiConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoggingColorMode {
+    #[default]
     Auto,
     Always,
     Never,
-}
-
-impl Default for LoggingColorMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Default for TlsConfig {
@@ -284,6 +315,54 @@ impl Default for LoggingAdminApiConfig {
     }
 }
 
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            max_artifact_size_mb: default_max_artifact_size_mb(),
+            max_total_artifact_size_mb: default_max_total_artifact_size_mb(),
+            max_metadata_size_kb: default_max_metadata_size_kb(),
+            max_platforms: default_max_platforms(),
+        }
+    }
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: default_stats_queue_capacity(),
+            max_pending_events: default_stats_max_pending_events(),
+            rollup_trigger_events: default_stats_rollup_trigger_events(),
+            rollup_interval_seconds: default_stats_rollup_interval_seconds(),
+        }
+    }
+}
+
+impl UploadConfig {
+    pub fn policy(&self) -> Result<crate::models::UploadPolicy> {
+        let max_artifact_bytes = self
+            .max_artifact_size_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| {
+                UdsError::Config("upload.max_artifact_size_mb is too large".to_string())
+            })?;
+        let max_total_artifact_bytes = self
+            .max_total_artifact_size_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| {
+                UdsError::Config("upload.max_total_artifact_size_mb is too large".to_string())
+            })?;
+        let max_metadata_bytes = self.max_metadata_size_kb.checked_mul(1024).ok_or_else(|| {
+            UdsError::Config("upload.max_metadata_size_kb is too large".to_string())
+        })?;
+        Ok(crate::models::UploadPolicy {
+            max_artifact_bytes,
+            max_total_artifact_bytes,
+            max_metadata_bytes,
+            max_platforms: self.max_platforms,
+        })
+    }
+}
+
 impl ServerConfig {
     pub async fn load(cli: &Cli) -> Result<Self> {
         let mut config = if let Some(path) = &cli.config {
@@ -313,24 +392,36 @@ impl ServerConfig {
             tls: TlsConfig::default(),
             cluster: ClusterConfig::default(),
             logging: LoggingConfig::default(),
+            upload: UploadConfig::default(),
+            stats: StatsConfig::default(),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.public_base_url.trim().is_empty() {
-            return Err(UdsError::Config("public_base_url must not be empty".to_string()));
+            return Err(UdsError::Config(
+                "public_base_url must not be empty".to_string(),
+            ));
         }
 
         if self.admin_token.len() < 16 {
-            return Err(UdsError::Config("admin_token must contain at least 16 characters".to_string()));
+            return Err(UdsError::Config(
+                "admin_token must contain at least 16 characters".to_string(),
+            ));
         }
 
         if self.channels.is_empty() {
-            return Err(UdsError::Config("at least one channel must be configured".to_string()));
+            return Err(UdsError::Config(
+                "at least one channel must be configured".to_string(),
+            ));
         }
 
-        if self.mode == ServerMode::Fleet && self.cluster_token.as_deref().unwrap_or_default().len() < 16 {
-            return Err(UdsError::Config("cluster_token must contain at least 16 characters in fleet mode".to_string()));
+        if self.mode == ServerMode::Fleet
+            && self.cluster_token.as_deref().unwrap_or_default().len() < 16
+        {
+            return Err(UdsError::Config(
+                "cluster_token must contain at least 16 characters in fleet mode".to_string(),
+            ));
         }
 
         match self.tls.mode {
@@ -341,19 +432,59 @@ impl ServerConfig {
             }
             TlsMode::Acme => {
                 if self.tls.acme_domains.is_empty() {
-                    return Err(UdsError::Config("tls.acme_domains must contain at least one domain in ACME mode".to_string()));
+                    return Err(UdsError::Config(
+                        "tls.acme_domains must contain at least one domain in ACME mode"
+                            .to_string(),
+                    ));
                 }
                 if self.tls.acme_contact_email.is_none() {
-                    return Err(UdsError::Config("tls.acme_contact_email is required in ACME mode".to_string()));
+                    return Err(UdsError::Config(
+                        "tls.acme_contact_email is required in ACME mode".to_string(),
+                    ));
                 }
             }
         }
 
         if self.logging.level.trim().is_empty() {
-            return Err(UdsError::Config("logging.level must not be empty".to_string()));
+            return Err(UdsError::Config(
+                "logging.level must not be empty".to_string(),
+            ));
         }
         if self.logging.file.enabled && self.logging.file.max_size_mb == 0 {
-            return Err(UdsError::Config("logging.file.max_size_mb must be greater than 0".to_string()));
+            return Err(UdsError::Config(
+                "logging.file.max_size_mb must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.upload.max_artifact_size_mb == 0
+            || self.upload.max_total_artifact_size_mb == 0
+            || self.upload.max_metadata_size_kb == 0
+            || self.upload.max_platforms == 0
+        {
+            return Err(UdsError::Config(
+                "upload limits must be greater than zero".to_string(),
+            ));
+        }
+        if self.upload.max_artifact_size_mb > self.upload.max_total_artifact_size_mb {
+            return Err(UdsError::Config(
+                "upload.max_artifact_size_mb must not exceed upload.max_total_artifact_size_mb"
+                    .to_string(),
+            ));
+        }
+        self.upload.policy()?;
+        if self.stats.queue_capacity == 0
+            || self.stats.max_pending_events == 0
+            || self.stats.rollup_trigger_events == 0
+            || self.stats.rollup_interval_seconds == 0
+        {
+            return Err(UdsError::Config(
+                "stats limits and intervals must be greater than zero".to_string(),
+            ));
+        }
+        if self.stats.rollup_trigger_events > self.stats.max_pending_events {
+            return Err(UdsError::Config(
+                "stats.rollup_trigger_events must not exceed stats.max_pending_events".to_string(),
+            ));
         }
 
         Ok(())
@@ -367,7 +498,9 @@ impl ServerConfig {
 fn require_existing_file(path: Option<&Path>, name: &str) -> Result<()> {
     let path = path.ok_or_else(|| UdsError::Config(format!("{name} is required")))?;
     if !path.is_file() {
-        return Err(UdsError::Config(format!("{name} must point to an existing file")));
+        return Err(UdsError::Config(format!(
+            "{name} must point to an existing file"
+        )));
     }
     Ok(())
 }
@@ -421,6 +554,31 @@ fn default_max_log_size_mb() -> u64 {
 
 fn default_max_archived_log_files() -> usize {
     5
+}
+
+fn default_max_artifact_size_mb() -> u64 {
+    512
+}
+fn default_max_total_artifact_size_mb() -> u64 {
+    2048
+}
+fn default_max_metadata_size_kb() -> u64 {
+    1024
+}
+fn default_max_platforms() -> usize {
+    32
+}
+fn default_stats_queue_capacity() -> usize {
+    8192
+}
+fn default_stats_max_pending_events() -> usize {
+    100_000
+}
+fn default_stats_rollup_trigger_events() -> usize {
+    10_000
+}
+fn default_stats_rollup_interval_seconds() -> u64 {
+    900
 }
 
 #[cfg(test)]

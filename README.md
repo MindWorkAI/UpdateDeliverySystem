@@ -70,6 +70,18 @@ max_archived_files = 5
 
 [logging.admin_api]
 enabled = true
+
+[upload]
+max_artifact_size_mb = 512
+max_total_artifact_size_mb = 2048
+max_metadata_size_kb = 1024
+max_platforms = 32
+
+[stats]
+queue_capacity = 8192
+max_pending_events = 100000
+rollup_trigger_events = 10000
+rollup_interval_seconds = 900
 ```
 
 ### Modes
@@ -239,6 +251,7 @@ The client uses the following Admin API endpoints. All administration requests r
 - `DELETE /admin/v1/channels/{channel}/releases/{version}`
 - `POST /admin/v1/channels/{target_channel}/copy`
 - `GET /admin/v1/channels/{channel}/stats`
+- `GET /admin/v1/upload-policy`
 - `GET /admin/v1/logs/recent?lines=200`
 - `GET /admin/v1/logs/stream?lines=100`
 
@@ -316,21 +329,30 @@ The internal peer API is enabled only in fleet mode and uses `cluster_token`. Do
 
 ## Storage Layout
 
-UDS stores data below `data_dir`:
+UDS stores data below `data_dir`. Artifacts are immutable and addressed by their SHA-256 digest, so copying a release between channels does not duplicate artifact bytes:
 
 ```text
+blobs/
+  sha256/
+    ab/
+      ab0123.../
+        data
 releases/
   stable/
     26.7.2/
       manifest.json
-      MindWork-AI-Studio_26.7.2_windows_x86_64.zip
+staging/
+  uploads/
 stats/
-  raw/
+  events/
+  processing/
   rollups/
 node-id
 ```
 
-Manifests are written atomically. Changelog patches and withdrawals update the manifest without deleting artifacts.
+Uploads stream to staging files and are only published after every artifact and the release metadata have passed validation. Manifests are written atomically. Changelog patches and withdrawals update the manifest without deleting artifacts.
+
+Statistics are best effort and never make update checks or downloads fail. Events are queued with bounded capacity, persisted as UUID files, and compacted in crash-recoverable batches every 15 minutes or when the configured threshold is reached.
 
 ## Security Notes
 

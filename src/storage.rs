@@ -1,31 +1,53 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use bytes::Bytes;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
+use url::Url;
+use uuid::Uuid;
 
 use crate::errors::{Result, UdsError};
 use crate::models::{
     CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse,
-    ReleaseManifest, ReleaseUploadMetadata, TauriUpdateResponse,
+    ReleaseManifest, ReleaseUploadMetadata, TauriUpdateResponse, UploadPolicy,
 };
+
+#[derive(Debug, Clone)]
+pub struct StagedArtifact {
+    pub field_name: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct Storage {
     data_dir: PathBuf,
-    public_base_url: String,
+    public_base_url: Url,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl Storage {
     pub async fn new(data_dir: PathBuf, public_base_url: String) -> Result<Self> {
+        let public_base_url = Url::parse(&public_base_url).map_err(|error| {
+            UdsError::Config(format!("public_base_url is not a valid URL: {error}"))
+        })?;
         let storage = Self {
             data_dir,
             public_base_url,
+            mutation_lock: Arc::new(Mutex::new(())),
         };
         storage.ensure_layout().await?;
+        storage.ensure_no_legacy_releases().await?;
+        storage.cleanup_staging().await?;
+        storage.prune_unreferenced_blobs().await?;
         Ok(storage)
     }
 
@@ -33,14 +55,21 @@ impl Storage {
         &self.data_dir
     }
 
+    pub fn upload_staging_root(&self) -> PathBuf {
+        self.data_dir.join("staging/uploads")
+    }
+
     pub async fn put_release(
         &self,
         channel: &str,
         metadata: ReleaseUploadMetadata,
-        uploaded_files: BTreeMap<String, Bytes>,
+        staged_files: BTreeMap<String, StagedArtifact>,
+        policy: &UploadPolicy,
     ) -> Result<ReleaseManifest> {
         validate_path_segment(channel, "channel")?;
+        validate_upload_metadata(&metadata, &staged_files, policy)?;
         let version = normalize_version(&metadata.version)?;
+        let _guard = self.mutation_lock.lock().await;
         let release_dir = self.release_dir(channel, &version);
 
         if release_dir.exists() {
@@ -49,12 +78,9 @@ impl Storage {
             )));
         }
 
-        fs::create_dir_all(&release_dir).await?;
-
         let mut platforms = BTreeMap::new();
         for (platform_key, upload_platform) in metadata.platforms {
-            validate_platform_key(&platform_key)?;
-            let bytes = uploaded_files
+            let staged = staged_files
                 .get(&upload_platform.file_field)
                 .ok_or_else(|| {
                     UdsError::BadRequest(format!(
@@ -62,18 +88,14 @@ impl Storage {
                         upload_platform.file_field
                     ))
                 })?;
-
-            validate_path_segment(&upload_platform.file_name, "file_name")?;
-            let artifact_path = release_dir.join(&upload_platform.file_name);
-            fs::write(&artifact_path, bytes).await?;
-
+            self.publish_blob(staged).await?;
             platforms.insert(
                 platform_key,
                 PlatformArtifact {
                     file_name: upload_platform.file_name,
                     signature: upload_platform.signature,
-                    size: bytes.len() as u64,
-                    sha256: sha256_hex(bytes),
+                    size: staged.size,
+                    sha256: staged.sha256.clone(),
                 },
             );
         }
@@ -87,8 +109,28 @@ impl Storage {
             updated_at: OffsetDateTime::now_utc(),
         };
 
-        self.save_manifest(channel, &version, &manifest).await?;
-        Ok(manifest)
+        let staging_dir = self
+            .data_dir
+            .join("staging/releases")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&staging_dir).await?;
+        atomic_write_json(staging_dir.join("manifest.json"), &manifest).await?;
+        if let Some(parent) = release_dir.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        match fs::rename(&staging_dir, &release_dir).await {
+            Ok(()) => Ok(manifest),
+            Err(_error) if release_dir.exists() => {
+                let _ = fs::remove_dir_all(&staging_dir).await;
+                Err(UdsError::Conflict(format!(
+                    "release {channel}/{version} already exists"
+                )))
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging_dir).await;
+                Err(error.into())
+            }
+        }
     }
 
     pub async fn patch_changelog(
@@ -98,6 +140,7 @@ impl Storage {
         notes: String,
     ) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
+        let _guard = self.mutation_lock.lock().await;
         let mut manifest = self.load_manifest(channel, &version).await?;
         manifest.notes = notes;
         manifest.updated_at = OffsetDateTime::now_utc();
@@ -107,6 +150,7 @@ impl Storage {
 
     pub async fn withdraw_release(&self, channel: &str, version: &str) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
+        let _guard = self.mutation_lock.lock().await;
         let mut manifest = self.load_manifest(channel, &version).await?;
         manifest.withdrawn = true;
         manifest.updated_at = OffsetDateTime::now_utc();
@@ -123,25 +167,29 @@ impl Storage {
         validate_path_segment(source_channel, "source_channel")?;
         validate_path_segment(target_channel, "target_channel")?;
         let version = normalize_version(version)?;
-        let source = self.release_dir(source_channel, &version);
+        let _guard = self.mutation_lock.lock().await;
         let target = self.release_dir(target_channel, &version);
-
-        if !source.exists() {
-            return Err(UdsError::NotFound(format!(
-                "release {source_channel}/{version} not found"
-            )));
-        }
         if target.exists() {
             return Err(UdsError::Conflict(format!(
                 "release {target_channel}/{version} already exists"
             )));
         }
 
-        copy_dir_all(&source, &target).await?;
-        let mut manifest = self.load_manifest(target_channel, &version).await?;
+        let mut manifest = self.load_manifest(source_channel, &version).await?;
+        for artifact in manifest.platforms.values() {
+            self.verify_blob(artifact).await?;
+        }
         manifest.updated_at = OffsetDateTime::now_utc();
-        self.save_manifest(target_channel, &version, &manifest)
-            .await?;
+        let staging_dir = self
+            .data_dir
+            .join("staging/releases")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&staging_dir).await?;
+        atomic_write_json(staging_dir.join("manifest.json"), &manifest).await?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::rename(staging_dir, target).await?;
         Ok(manifest)
     }
 
@@ -155,11 +203,9 @@ impl Storage {
         validate_path_segment(channel, "channel")?;
         validate_path_segment(target, "target")?;
         validate_path_segment(arch, "arch")?;
-
         let current = parse_version(current_version)?;
         let platform_key = format!("{target}-{arch}");
         let releases = self.list_releases(channel).await?;
-
         let mut candidates = Vec::new();
         for manifest in releases {
             if manifest.withdrawn || !manifest.platforms.contains_key(&platform_key) {
@@ -170,7 +216,6 @@ impl Storage {
                 candidates.push((parsed, manifest));
             }
         }
-
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         let Some((offered_version, offered_manifest)) = candidates.last() else {
             return Ok(None);
@@ -196,18 +241,26 @@ impl Storage {
             notes.push_str(manifest.notes.trim());
         }
 
-        let url = format!(
-            "{}/api/v1/downloads/{}/{}/{}/{}",
-            self.public_base_url.trim_end_matches('/'),
-            channel,
-            offered_manifest.version,
-            platform_key,
-            artifact.file_name
-        );
+        let mut url = self.public_base_url.clone();
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                UdsError::Config("public_base_url cannot be used as a hierarchical URL".to_string())
+            })?;
+            segments.pop_if_empty();
+            segments.extend([
+                "api",
+                "v1",
+                "downloads",
+                channel,
+                &offered_manifest.version,
+                &platform_key,
+                &artifact.file_name,
+            ]);
+        }
 
         Ok(Some(TauriUpdateResponse {
             version: offered_manifest.version.clone(),
-            url,
+            url: url.to_string(),
             signature: artifact.signature.clone(),
             pub_date: offered_manifest.pub_date.clone(),
             notes,
@@ -220,7 +273,7 @@ impl Storage {
         version: &str,
         platform: &str,
         file_name: &str,
-    ) -> Result<PathBuf> {
+    ) -> Result<(PathBuf, u64)> {
         validate_path_segment(channel, "channel")?;
         validate_platform_key(platform)?;
         validate_path_segment(file_name, "file_name")?;
@@ -236,7 +289,8 @@ impl Storage {
                 "artifact {file_name} not found"
             )));
         }
-        Ok(self.release_dir(channel, &version).join(file_name))
+        self.verify_blob(artifact).await?;
+        Ok((self.blob_data_path(&artifact.sha256), artifact.size))
     }
 
     pub async fn release_list(&self, channel: &str) -> Result<ReleaseListResponse> {
@@ -252,27 +306,13 @@ impl Storage {
                 updated_at: manifest.updated_at,
             })
             .collect::<Vec<_>>();
-
-        releases.sort_by(|left, right| {
-            let left_version = parse_version(&left.version);
-            let right_version = parse_version(&right.version);
-            match (left_version, right_version) {
-                (Ok(left_version), Ok(right_version)) => right_version.cmp(&left_version),
-                _ => right.version.cmp(&left.version),
-            }
-        });
-
+        releases.sort_by_key(|release| std::cmp::Reverse(parse_version(&release.version).ok()));
         Ok(ReleaseListResponse { releases })
     }
 
     pub async fn catalog(&self) -> Result<CatalogResponse> {
         let mut entries = Vec::new();
-        let releases_root = self.data_dir.join("releases");
-        if !releases_root.exists() {
-            return Ok(CatalogResponse { entries });
-        }
-
-        let mut channels = fs::read_dir(releases_root).await?;
+        let mut channels = fs::read_dir(self.data_dir.join("releases")).await?;
         while let Some(channel_entry) = channels.next_entry().await? {
             if !channel_entry.file_type().await?.is_dir() {
                 continue;
@@ -288,7 +328,6 @@ impl Storage {
                 });
             }
         }
-
         entries.sort_by(|left, right| {
             left.channel
                 .cmp(&right.channel)
@@ -298,9 +337,143 @@ impl Storage {
     }
 
     async fn ensure_layout(&self) -> Result<()> {
-        fs::create_dir_all(self.data_dir.join("releases")).await?;
-        fs::create_dir_all(self.data_dir.join("stats/raw")).await?;
-        fs::create_dir_all(self.data_dir.join("stats/rollups")).await?;
+        for path in [
+            "releases",
+            "blobs/sha256",
+            "staging/uploads",
+            "staging/releases",
+        ] {
+            fs::create_dir_all(self.data_dir.join(path)).await?;
+        }
+        Ok(())
+    }
+
+    async fn cleanup_staging(&self) -> Result<()> {
+        for path in ["staging/uploads", "staging/releases"] {
+            let directory = self.data_dir.join(path);
+            if directory.exists() {
+                fs::remove_dir_all(&directory).await?;
+            }
+            fs::create_dir_all(directory).await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_no_legacy_releases(&self) -> Result<()> {
+        let root = self.data_dir.join("releases");
+        let mut channels = fs::read_dir(root).await?;
+        while let Some(channel) = channels.next_entry().await? {
+            if !channel.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut releases = fs::read_dir(channel.path()).await?;
+            while let Some(release) = releases.next_entry().await? {
+                if !release.file_type().await?.is_dir() {
+                    continue;
+                }
+                let mut files = fs::read_dir(release.path()).await?;
+                while let Some(file) = files.next_entry().await? {
+                    if file.file_name() != "manifest.json" {
+                        return Err(UdsError::Storage(format!(
+                            "legacy release storage detected at '{}'; migration is intentionally unsupported",
+                            release.path().display()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn publish_blob(&self, staged: &StagedArtifact) -> Result<()> {
+        validate_sha256(&staged.sha256)?;
+        let target_dir = self.blob_dir(&staged.sha256);
+        if target_dir.exists() {
+            self.verify_staged_against_existing(staged).await?;
+            return Ok(());
+        }
+        let shard = target_dir.parent().expect("blob digest has shard parent");
+        fs::create_dir_all(shard).await?;
+        let temp_dir = shard.join(format!(".tmp-{}", Uuid::new_v4()));
+        fs::create_dir(&temp_dir).await?;
+        fs::rename(&staged.path, temp_dir.join("data")).await?;
+        match fs::rename(&temp_dir, &target_dir).await {
+            Ok(()) => Ok(()),
+            Err(_error) if target_dir.exists() => {
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                self.verify_staged_against_existing(staged).await
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn verify_staged_against_existing(&self, staged: &StagedArtifact) -> Result<()> {
+        let path = self.blob_data_path(&staged.sha256);
+        let metadata = fs::metadata(&path).await.map_err(|error| {
+            UdsError::Storage(format!("blob {} is incomplete: {error}", staged.sha256))
+        })?;
+        if metadata.len() != staged.size || sha256_file(&path).await? != staged.sha256 {
+            return Err(UdsError::Storage(format!(
+                "blob {} failed integrity validation",
+                staged.sha256
+            )));
+        }
+        Ok(())
+    }
+
+    async fn verify_blob(&self, artifact: &PlatformArtifact) -> Result<()> {
+        validate_sha256(&artifact.sha256)?;
+        let path = self.blob_data_path(&artifact.sha256);
+        let metadata = fs::metadata(&path).await.map_err(|error| {
+            UdsError::Storage(format!(
+                "artifact blob {} is unavailable: {error}",
+                artifact.sha256
+            ))
+        })?;
+        if !metadata.is_file() || metadata.len() != artifact.size {
+            return Err(UdsError::Storage(format!(
+                "artifact blob {} has an unexpected size",
+                artifact.sha256
+            )));
+        }
+        Ok(())
+    }
+
+    async fn prune_unreferenced_blobs(&self) -> Result<()> {
+        let mut referenced = BTreeSet::new();
+        let releases_root = self.data_dir.join("releases");
+        let mut channels = fs::read_dir(&releases_root).await?;
+        while let Some(channel) = channels.next_entry().await? {
+            if !channel.file_type().await?.is_dir() {
+                continue;
+            }
+            let name = channel.file_name().to_string_lossy().to_string();
+            for manifest in self.list_releases(&name).await? {
+                referenced.extend(
+                    manifest
+                        .platforms
+                        .values()
+                        .map(|artifact| artifact.sha256.clone()),
+                );
+            }
+        }
+        let blobs_root = self.data_dir.join("blobs/sha256");
+        let mut shards = fs::read_dir(&blobs_root).await?;
+        while let Some(shard) = shards.next_entry().await? {
+            if !shard.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut digests = fs::read_dir(shard.path()).await?;
+            while let Some(digest) = digests.next_entry().await? {
+                let name = digest.file_name().to_string_lossy().to_string();
+                if name.starts_with(".tmp-") || !referenced.contains(&name) {
+                    fs::remove_dir_all(digest.path()).await?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -310,7 +483,6 @@ impl Storage {
         if !channel_dir.exists() {
             return Ok(Vec::new());
         }
-
         let mut releases = Vec::new();
         let mut entries = fs::read_dir(channel_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -331,8 +503,7 @@ impl Storage {
                 "release {channel}/{version} not found"
             )));
         }
-        let text = fs::read_to_string(path).await?;
-        Ok(serde_json::from_str(&text)?)
+        Ok(serde_json::from_slice(&fs::read(path).await?)?)
     }
 
     async fn save_manifest(
@@ -341,14 +512,7 @@ impl Storage {
         version: &str,
         manifest: &ReleaseManifest,
     ) -> Result<()> {
-        let release_dir = self.release_dir(channel, version);
-        fs::create_dir_all(&release_dir).await?;
-        let tmp_path = release_dir.join("manifest.json.tmp");
-        let final_path = release_dir.join("manifest.json");
-        let bytes = serde_json::to_vec_pretty(manifest)?;
-        fs::write(&tmp_path, bytes).await?;
-        fs::rename(&tmp_path, &final_path).await?;
-        Ok(())
+        atomic_write_json(self.manifest_path(channel, version), manifest).await
     }
 
     fn release_dir(&self, channel: &str, version: &str) -> PathBuf {
@@ -358,16 +522,82 @@ impl Storage {
     fn manifest_path(&self, channel: &str, version: &str) -> PathBuf {
         self.release_dir(channel, version).join("manifest.json")
     }
+
+    fn blob_dir(&self, sha256: &str) -> PathBuf {
+        self.data_dir
+            .join("blobs/sha256")
+            .join(&sha256[..2])
+            .join(sha256)
+    }
+
+    fn blob_data_path(&self, sha256: &str) -> PathBuf {
+        self.blob_dir(sha256).join("data")
+    }
 }
 
 pub fn parse_version(version: &str) -> Result<Version> {
     let normalized = version.trim().trim_start_matches('v');
-    Ok(Version::parse(normalized)?)
+    Version::parse(normalized).map_err(|error| {
+        UdsError::BadRequest(format!("invalid semantic version '{version}': {error}"))
+    })
 }
 
 fn normalize_version(version: &str) -> Result<String> {
-    let parsed = parse_version(version)?;
-    Ok(parsed.to_string())
+    Ok(parse_version(version)?.to_string())
+}
+
+fn validate_upload_metadata(
+    metadata: &ReleaseUploadMetadata,
+    files: &BTreeMap<String, StagedArtifact>,
+    policy: &UploadPolicy,
+) -> Result<()> {
+    let _ = normalize_version(&metadata.version)?;
+    if metadata.platforms.is_empty() || metadata.platforms.len() > policy.max_platforms {
+        return Err(UdsError::BadRequest(format!(
+            "release must contain between 1 and {} platforms",
+            policy.max_platforms
+        )));
+    }
+    if let Some(pub_date) = &metadata.pub_date {
+        OffsetDateTime::parse(pub_date, &Rfc3339)
+            .map_err(|error| UdsError::BadRequest(format!("pub_date must be RFC 3339: {error}")))?;
+    }
+    let referenced = metadata
+        .platforms
+        .values()
+        .map(|platform| platform.file_field.as_str())
+        .collect::<BTreeSet<_>>();
+    let supplied = files.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if referenced != supplied {
+        return Err(UdsError::BadRequest(
+            "multipart file fields must exactly match metadata references".to_string(),
+        ));
+    }
+    for (platform_key, platform) in &metadata.platforms {
+        validate_platform_key(platform_key)?;
+        validate_path_segment(&platform.file_name, "file_name")?;
+        if platform.signature.trim().is_empty() {
+            return Err(UdsError::BadRequest(format!(
+                "signature for platform {platform_key} must not be empty"
+            )));
+        }
+    }
+    let mut total = 0u64;
+    for staged in files.values() {
+        if staged.size > policy.max_artifact_bytes {
+            return Err(UdsError::PayloadTooLarge(format!(
+                "multipart file field '{}' exceeds the configured limit",
+                staged.field_name
+            )));
+        }
+        total = total.saturating_add(staged.size);
+    }
+    if total > policy.max_total_artifact_bytes {
+        return Err(UdsError::PayloadTooLarge(
+            "release artifacts exceed the configured total limit".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_path_segment(value: &str, name: &str) -> Result<()> {
@@ -376,6 +606,7 @@ fn validate_path_segment(value: &str, name: &str) -> Result<()> {
         || value.contains('\\')
         || value == "."
         || value == ".."
+        || value.chars().any(char::is_control)
     {
         return Err(UdsError::BadRequest(format!(
             "{name} is not a safe path segment"
@@ -394,23 +625,49 @@ fn validate_platform_key(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
-    let digest = Sha256::digest(bytes.as_ref());
-    hex::encode(digest)
+fn validate_sha256(value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(UdsError::Storage(
+            "manifest contains an invalid SHA-256 digest".to_string(),
+        ));
+    }
+    Ok(())
 }
 
-async fn copy_dir_all(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir_all(target).await?;
-    let mut entries = fs::read_dir(source).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let file_type = entry.file_type().await?;
-        let target_path = target.join(entry.file_name());
-        if file_type.is_dir() {
-            Box::pin(copy_dir_all(&entry.path(), &target_path)).await?;
-        } else {
-            fs::copy(entry.path(), target_path).await?;
+fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(bytes.as_ref()))
+}
+
+async fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
         }
+        hasher.update(&buffer[..read]);
     }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+async fn atomic_write_json(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| UdsError::Storage("atomic write path has no parent".to_string()))?;
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(&path)
+            .map_err(|error| UdsError::Io(error.error))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| UdsError::Storage(format!("atomic writer task failed: {error}")))??;
     Ok(())
 }
 
@@ -419,56 +676,28 @@ mod tests {
     use super::*;
     use crate::models::UploadPlatformMetadata;
 
-    #[tokio::test]
-    async fn update_notes_include_all_versions_after_current_version() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::new(
-            temp.path().to_path_buf(),
-            "https://updates.example.test".to_string(),
-        )
-        .await
-        .unwrap();
-
-        for version in ["26.6.0", "26.7.0", "26.7.2"] {
-            let mut platforms = BTreeMap::new();
-            platforms.insert(
-                "windows-x86_64".to_string(),
-                UploadPlatformMetadata {
-                    file_field: "bundle".to_string(),
-                    file_name: format!("ai-studio-{version}.zip"),
-                    signature: format!("signature-{version}"),
-                },
-            );
-            let mut files = BTreeMap::new();
-            files.insert("bundle".to_string(), Bytes::from_static(b"bundle"));
-            storage
-                .put_release(
-                    "stable",
-                    ReleaseUploadMetadata {
-                        version: version.to_string(),
-                        pub_date: None,
-                        notes: format!("Changed in {version}"),
-                        platforms,
-                    },
-                    files,
-                )
-                .await
-                .unwrap();
+    fn policy() -> UploadPolicy {
+        UploadPolicy {
+            max_artifact_bytes: 1024,
+            max_total_artifact_bytes: 4096,
+            max_metadata_bytes: 1024,
+            max_platforms: 8,
         }
+    }
 
-        let update = storage
-            .update_for("stable", "windows", "x86_64", "26.5.5")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(update.version, "26.7.2");
-        assert!(update.notes.contains("Changed in 26.6.0"));
-        assert!(update.notes.contains("Changed in 26.7.0"));
-        assert!(update.notes.contains("Changed in 26.7.2"));
+    async fn staged(root: &Path, field: &str, bytes: &[u8]) -> StagedArtifact {
+        let path = root.join(field);
+        fs::write(&path, bytes).await.unwrap();
+        StagedArtifact {
+            field_name: field.to_string(),
+            path,
+            size: bytes.len() as u64,
+            sha256: sha256_hex(bytes),
+        }
     }
 
     #[tokio::test]
-    async fn release_list_is_sorted_newest_first() {
+    async fn copy_reuses_content_addressed_blob() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Storage::new(
             temp.path().to_path_buf(),
@@ -476,40 +705,38 @@ mod tests {
         )
         .await
         .unwrap();
-
-        for version in ["26.6.0", "26.7.2", "26.7.0"] {
-            let mut platforms = BTreeMap::new();
-            platforms.insert(
+        let artifact = staged(temp.path(), "bundle", b"bundle").await;
+        let digest = artifact.sha256.clone();
+        let metadata = ReleaseUploadMetadata {
+            version: "26.7.2".to_string(),
+            pub_date: Some("2026-07-06T18:35:11Z".to_string()),
+            notes: "notes".to_string(),
+            platforms: BTreeMap::from([(
                 "linux-x86_64".to_string(),
                 UploadPlatformMetadata {
                     file_field: "bundle".to_string(),
-                    file_name: format!("ai-studio-{version}.tar.gz"),
-                    signature: format!("signature-{version}"),
+                    file_name: "studio.tar.gz".to_string(),
+                    signature: "signature".to_string(),
                 },
-            );
-            let mut files = BTreeMap::new();
-            files.insert("bundle".to_string(), Bytes::from_static(b"bundle"));
-            storage
-                .put_release(
-                    "stable",
-                    ReleaseUploadMetadata {
-                        version: version.to_string(),
-                        pub_date: None,
-                        notes: String::new(),
-                        platforms,
-                    },
-                    files,
-                )
-                .await
-                .unwrap();
-        }
-
-        let response = storage.release_list("stable").await.unwrap();
-        let versions = response
-            .releases
-            .into_iter()
-            .map(|release| release.version)
-            .collect::<Vec<_>>();
-        assert_eq!(versions, vec!["26.7.2", "26.7.0", "26.6.0"]);
+            )]),
+        };
+        storage
+            .put_release(
+                "beta",
+                metadata,
+                BTreeMap::from([("bundle".to_string(), artifact)]),
+                &policy(),
+            )
+            .await
+            .unwrap();
+        storage
+            .copy_release("beta", "stable", "26.7.2")
+            .await
+            .unwrap();
+        assert!(storage.blob_data_path(&digest).is_file());
+        assert_eq!(
+            storage.release_list("stable").await.unwrap().releases.len(),
+            1
+        );
     }
 }

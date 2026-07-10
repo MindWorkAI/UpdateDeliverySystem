@@ -14,6 +14,9 @@ pub enum UdsError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -49,6 +52,7 @@ impl IntoResponse for UdsError {
         let status = match self {
             UdsError::BadRequest(_) => StatusCode::BAD_REQUEST,
             UdsError::Unauthorized => StatusCode::UNAUTHORIZED,
+            UdsError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             UdsError::NotFound(_) => StatusCode::NOT_FOUND,
             UdsError::Conflict(_) => StatusCode::CONFLICT,
             UdsError::Config(_)

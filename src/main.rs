@@ -22,7 +22,11 @@ async fn main() -> anyhow::Result<()> {
         config.public_base_url.clone(),
     )
     .await?;
-    let stats = update_delivery_system::stats::StatsRecorder::new(config.data_dir.clone()).await?;
+    let stats = update_delivery_system::stats::StatsRecorder::new(
+        config.data_dir.clone(),
+        config.stats.clone(),
+    )
+    .await?;
     let cluster = ClusterState::new(&config).await?;
     tracing::info!(
         mode = ?config.mode,

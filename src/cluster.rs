@@ -23,7 +23,8 @@ pub struct ClusterState {
 impl ClusterState {
     pub async fn new(config: &ServerConfig) -> Result<Self> {
         let enabled = config.mode == ServerMode::Fleet;
-        let node_id = load_or_create_node_id(config.data_dir.join(&config.cluster.node_id_path)).await?;
+        let node_id =
+            load_or_create_node_id(config.data_dir.join(&config.cluster.node_id_path)).await?;
         Ok(Self {
             node_id,
             enabled,
@@ -45,7 +46,11 @@ impl ClusterState {
         }
 
         let peers = self.peers.lock().await;
-        debug!(event_id = event.event_id, peer_count = peers.len(), "queued replication event");
+        debug!(
+            event_id = event.event_id,
+            peer_count = peers.len(),
+            "queued replication event"
+        );
         !peers.is_empty()
     }
 
@@ -74,7 +79,9 @@ async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Re
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
     let message = format!("uds:{}:{}", cluster.node_id(), config.public_base_url);
-    socket.send_to(message.as_bytes(), config.cluster.broadcast_addr).await?;
+    socket
+        .send_to(message.as_bytes(), config.cluster.broadcast_addr)
+        .await?;
     Ok(())
 }
 

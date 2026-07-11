@@ -205,6 +205,9 @@ pub struct LoggingConfig {
     pub filter: String,
 
     #[serde(default)]
+    pub client_ip: ClientIpLoggingMode,
+
+    #[serde(default)]
     pub console: LoggingConsoleConfig,
 
     #[serde(default)]
@@ -212,6 +215,15 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     pub admin_api: LoggingAdminApiConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClientIpLoggingMode {
+    Never,
+    #[default]
+    AuditSecurity,
+    Always,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +294,7 @@ impl Default for LoggingConfig {
         Self {
             level: default_log_level(),
             filter: String::new(),
+            client_ip: ClientIpLoggingMode::AuditSecurity,
             console: LoggingConsoleConfig::default(),
             file: LoggingFileConfig::default(),
             admin_api: LoggingAdminApiConfig::default(),
@@ -599,5 +612,23 @@ mod tests {
         config.cluster_token = None;
         let result = config.validate();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_ip_logging_modes_parse_and_default() {
+        assert_eq!(
+            LoggingConfig::default().client_ip,
+            ClientIpLoggingMode::AuditSecurity
+        );
+        for (value, expected) in [
+            ("never", ClientIpLoggingMode::Never),
+            ("audit-security", ClientIpLoggingMode::AuditSecurity),
+            ("always", ClientIpLoggingMode::Always),
+        ] {
+            let parsed: ClientIpLoggingMode =
+                serde_json::from_str(&format!("\"{value}\"")).unwrap();
+            assert_eq!(parsed, expected);
+        }
+        assert!(serde_json::from_str::<ClientIpLoggingMode>("\"sometimes\"").is_err());
     }
 }

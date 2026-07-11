@@ -64,7 +64,7 @@ color = "auto"
 
 [logging.file]
 enabled = true
-path = "/var/log/mindwork-ai/uds/events.log"
+path = "/var/log/mindwork-ai/uds/events.ndjson"
 max_size_mb = 100
 max_archived_files = 5
 
@@ -269,15 +269,15 @@ Log API responses use newline-delimited JSON (`application/x-ndjson`) and requir
 UDS uses UTC timestamps and a log layout inspired by the MindWork AI Studio runtime:
 
 ```text
-[2026-07-08 12:00:00.001] INFO [update_delivery_system::tls] [bind = 0.0.0.0:443] starting HTTPS server with file-based TLS
+[2026-07-08T12:00:00.001Z] INFO [update_delivery_system::tls] [bind = "0.0.0.0:443"] starting HTTPS server with file-based TLS
 ```
 
-Systemd and file logs are intentionally colorless. Terminal colors are only used when `logging.console.color = "always"` or when `color = "auto"` and stdout is an interactive terminal.
+Console logs remain human-readable. Files use typed NDJSON with one event per line. Terminal colors are only used when `logging.console.color = "always"` or when `color = "auto"` and stdout is an interactive terminal.
 
 The default production log base path is:
 
 ```text
-/var/log/mindwork-ai/uds/events.log
+<data_dir>/logs/events.ndjson
 ```
 
 UDS uses `flexi_logger` for file rotation and cleanup. The configured `logging.file.path` is the base name for the rotating file set. With the default path above, the active file is `events_rCURRENT.log`; archived files are named `events_r00000.log`, `events_r00001.log`, and so on. The active file is rotated when it exceeds `logging.file.max_size_mb`, which defaults to 100 MB, and UDS keeps up to `logging.file.max_archived_files` archives.

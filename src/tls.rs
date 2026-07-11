@@ -9,7 +9,7 @@ pub async fn serve(config: ServerConfig, router: Router) -> Result<()> {
         TlsMode::Off => {
             tracing::info!(bind = %config.bind, "starting HTTP server without TLS");
             axum_server::bind(config.bind)
-                .serve(router.into_make_service())
+                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
         }
@@ -19,7 +19,7 @@ pub async fn serve(config: ServerConfig, router: Router) -> Result<()> {
             let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
             tracing::info!(bind = %config.bind, "starting HTTPS server with file-based TLS");
             axum_server::bind_rustls(config.bind, tls_config)
-                .serve(router.into_make_service())
+                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
         }

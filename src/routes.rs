@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::body::{Body, HttpBody};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Multipart, Path, Query, State,
+};
+use axum::http::{HeaderValue, Request, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -15,10 +18,12 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::cluster::ClusterState;
+use crate::config::LogLevel;
 use crate::config::{ServerConfig, ServerMode};
-use crate::errors::{Result, UdsError};
+use crate::errors::{ErrorResponseMetadata, Result, UdsError};
 use crate::logging::{
-    LoggingRuntime, events_to_ndjson, read_recent_events, stream_events_from_file,
+    LogEventKind, LoggingRuntime, RequestMetadata, events_to_ndjson, read_recent_events,
+    stream_events,
 };
 use crate::models::{
     CatalogResponse, ChangelogPatchRequest, CopyReleaseRequest, MutationResponse,
@@ -92,7 +97,112 @@ pub fn build_router(state: AppState) -> Router {
             .route("/internal/v1/stats/local/{channel}", get(local_stats));
     }
 
-    router.with_state(state)
+    router
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(|_| {
+            UdsError::Storage("request handler panicked".into()).into_response()
+        }))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_logging,
+        ))
+        .with_state(state)
+}
+
+async fn request_logging(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 128
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let socket_ip = request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|v| v.0.ip());
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_string());
+    let metadata = RequestMetadata {
+        request_id: request_id.clone(),
+        socket_ip,
+        method: request.method().to_string(),
+        route,
+    };
+    request.extensions_mut().insert(metadata.clone());
+    let started = std::time::Instant::now();
+
+    // Run the next middleware or handler and capture the response:
+    let mut response = next.run(request).await;
+    let status = response.status();
+    if let Some(error) = response.extensions().get::<ErrorResponseMetadata>()
+        && error.internal
+    {
+        let mut error_fields = BTreeMap::new();
+        error_fields.insert(
+            "error_id".into(),
+            serde_json::Value::from(error.error_id.to_string()),
+        );
+        let event = state.logging.event(
+            LogLevel::Error,
+            LogEventKind::System,
+            "uds::error",
+            Some(&metadata),
+            error_fields,
+            "request failed internally",
+        );
+        state.logging.emit(&event);
+    }
+    let route = metadata
+        .route
+        .clone()
+        .unwrap_or_else(|| "<unmatched>".into());
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "method".into(),
+        serde_json::Value::from(metadata.method.clone()),
+    );
+    fields.insert("route".into(), serde_json::Value::from(route));
+    fields.insert("status".into(), serde_json::Value::from(status.as_u16()));
+    fields.insert(
+        "latency_ms".into(),
+        serde_json::Value::from(started.elapsed().as_millis() as u64),
+    );
+    if let Some(size) = response.body().size_hint().exact() {
+        fields.insert("response_size".into(), serde_json::Value::from(size));
+    }
+    let level = if status.is_server_error() {
+        LogLevel::Error
+    } else if status.is_client_error() {
+        LogLevel::Warn
+    } else if metadata.route.as_deref() == Some("/health") {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    };
+    let event = state.logging.event(
+        level,
+        LogEventKind::Http,
+        "uds::http",
+        Some(&metadata),
+        fields,
+        "request completed",
+    );
+    state.logging.emit(&event);
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -186,6 +296,7 @@ async fn download_artifact(
 async fn upload_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
+    Extension(request): Extension<RequestMetadata>,
     Path(channel): Path<String>,
     multipart: Multipart,
 ) -> Result<Json<MutationResponse>> {
@@ -206,6 +317,39 @@ async fn upload_release(
         ))
         .await;
 
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "audit_action".into(),
+        serde_json::Value::from("release_uploaded"),
+    );
+    fields.insert("channel".into(), serde_json::Value::from(channel.clone()));
+    fields.insert(
+        "version".into(),
+        serde_json::Value::from(manifest.version.clone()),
+    );
+    fields.insert(
+        "platform_count".into(),
+        serde_json::Value::from(manifest.platforms.len()),
+    );
+    fields.insert(
+        "total_size".into(),
+        serde_json::Value::from(
+            manifest
+                .platforms
+                .values()
+                .map(|artifact| artifact.size)
+                .sum::<u64>(),
+        ),
+    );
+    let event = state.logging.event(
+        LogLevel::Info,
+        LogEventKind::Audit,
+        "uds::audit",
+        Some(&request),
+        fields,
+        "release uploaded",
+    );
+    state.logging.emit(&event);
     Ok(Json(MutationResponse {
         channel,
         version: manifest.version,
@@ -232,6 +376,7 @@ async fn list_releases(
 async fn patch_changelog(
     State(state): State<AppState>,
     _auth: AdminAuth,
+    Extension(request_metadata): Extension<RequestMetadata>,
     Path((channel, version)): Path<(String, String)>,
     Json(request): Json<ChangelogPatchRequest>,
 ) -> Result<Json<MutationResponse>> {
@@ -249,6 +394,14 @@ async fn patch_changelog(
         ))
         .await;
 
+    emit_audit(
+        &state,
+        &request_metadata,
+        "changelog_updated",
+        &channel,
+        &manifest.version,
+        None,
+    );
     Ok(Json(MutationResponse {
         channel,
         version: manifest.version,
@@ -259,6 +412,7 @@ async fn patch_changelog(
 async fn withdraw_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
+    Extension(request_metadata): Extension<RequestMetadata>,
     Path((channel, version)): Path<(String, String)>,
 ) -> Result<Json<MutationResponse>> {
     require_allowed_channel(&state, &channel)?;
@@ -272,6 +426,14 @@ async fn withdraw_release(
         ))
         .await;
 
+    emit_audit(
+        &state,
+        &request_metadata,
+        "release_withdrawn",
+        &channel,
+        &manifest.version,
+        None,
+    );
     Ok(Json(MutationResponse {
         channel,
         version: manifest.version,
@@ -282,6 +444,7 @@ async fn withdraw_release(
 async fn copy_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
+    Extension(request_metadata): Extension<RequestMetadata>,
     Path(target_channel): Path<String>,
     Json(request): Json<CopyReleaseRequest>,
 ) -> Result<Json<MutationResponse>> {
@@ -300,6 +463,14 @@ async fn copy_release(
         ))
         .await;
 
+    emit_audit(
+        &state,
+        &request_metadata,
+        "release_copied",
+        &target_channel,
+        &manifest.version,
+        Some(&request.source_channel),
+    );
     Ok(Json(MutationResponse {
         channel: target_channel,
         version: manifest.version,
@@ -334,7 +505,11 @@ async fn recent_logs(
     let body = events_to_ndjson(&events)?;
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store, no-transform"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         body,
     )
         .into_response())
@@ -345,18 +520,50 @@ async fn stream_logs(
     _auth: AdminAuth,
     Query(query): Query<LogQuery>,
 ) -> Result<Response> {
-    let path = state
+    state
         .logging
         .active_file_path()
-        .ok_or_else(|| UdsError::Config("file logging is disabled".to_string()))?
-        .to_path_buf();
-    let stream = stream_events_from_file(path, query.lines.unwrap_or(100).min(10_000)).await;
+        .ok_or_else(|| UdsError::Config("file logging is disabled".to_string()))?;
+    let stream = stream_events(
+        state.logging.clone(),
+        query.lines.unwrap_or(100).min(10_000),
+    );
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store, no-transform"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+fn emit_audit(
+    state: &AppState,
+    request: &RequestMetadata,
+    action: &str,
+    channel: &str,
+    version: &str,
+    source_channel: Option<&str>,
+) {
+    let mut fields = BTreeMap::new();
+    fields.insert("audit_action".into(), serde_json::Value::from(action));
+    fields.insert("channel".into(), serde_json::Value::from(channel));
+    fields.insert("version".into(), serde_json::Value::from(version));
+    if let Some(source) = source_channel {
+        fields.insert("source_channel".into(), serde_json::Value::from(source));
+    }
+    let event = state.logging.event(
+        LogLevel::Info,
+        LogEventKind::Audit,
+        "uds::audit",
+        Some(request),
+        fields,
+        action,
+    );
+    state.logging.emit(&event);
 }
 
 async fn catalog(

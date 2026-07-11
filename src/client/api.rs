@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -128,40 +129,59 @@ impl AdminClient {
     where
         F: FnMut(LogEventLine),
     {
-        let response = self
-            .http
-            .get(self.url(&format!("/admin/v1/logs/stream?lines={lines}")))
-            .bearer_auth(&self.admin_token)
-            .send()
-            .await
-            .map_err(|error| UdsError::Storage(format!("log stream request failed: {error}")))?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.map_err(|error| {
-                UdsError::Storage(format!("failed to read log stream error body: {error}"))
-            })?;
-            return Err(UdsError::Storage(format!(
-                "UDS returned HTTP {status}: {text}"
-            )));
-        }
-
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|error| UdsError::Storage(format!("log stream failed: {error}")))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(index) = buffer.find('\n') {
-                let line = buffer[..index].trim().to_string();
-                buffer.drain(..=index);
-                if line.is_empty() {
+        let mut seen = HashSet::new();
+        let mut backoff = Duration::from_millis(250);
+        let mut history_lines = lines;
+        loop {
+            let sent = self
+                .http
+                .get(self.url(&format!("/admin/v1/logs/stream?lines={history_lines}")))
+                .bearer_auth(&self.admin_token)
+                .send()
+                .await;
+            let response = match sent {
+                Ok(response) => response,
+                Err(_) => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(10));
                     continue;
                 }
-                let event = serde_json::from_str::<LogEventLine>(&line)?;
-                on_event(event);
+            };
+            let status = response.status();
+            if status.is_client_error() {
+                let text = response.text().await.unwrap_or_default();
+                return Err(UdsError::Storage(format!(
+                    "UDS returned HTTP {status}: {text}"
+                )));
             }
+            if !status.is_success() {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(10));
+                continue;
+            }
+            backoff = Duration::from_millis(250);
+            history_lines = 0;
+            let mut stream = response.bytes_stream();
+            let mut buffer = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else { break };
+                buffer.extend_from_slice(&chunk);
+                while let Some(index) = buffer.iter().position(|b| *b == b'\n') {
+                    let line = buffer.drain(..=index).collect::<Vec<_>>();
+                    if line.iter().all(u8::is_ascii_whitespace) {
+                        continue;
+                    }
+                    let event: LogEventLine = serde_json::from_slice(&line)?;
+                    if seen.insert(event.event_id) {
+                        on_event(event);
+                    }
+                    if seen.len() > 20_000 {
+                        seen.clear();
+                    }
+                }
+            }
+            tokio::time::sleep(backoff).await;
         }
-        Ok(())
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {

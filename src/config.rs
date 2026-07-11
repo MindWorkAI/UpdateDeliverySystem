@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, UdsError};
@@ -10,6 +10,24 @@ use crate::errors::{Result, UdsError};
 #[derive(Debug, Parser)]
 #[command(name = "uds", about = "MindWork AI Studio Update Delivery System")]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    /// Run the UDS update delivery server.
+    Server(ServerArgs),
+
+    /// Run the interactive UDS administration client.
+    Client {
+        #[command(subcommand)]
+        command: Option<ClientCommand>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ServerArgs {
     /// Path to a TOML configuration file.
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -17,18 +35,6 @@ pub struct Cli {
     /// Force single-node mode and disable peer discovery and replication.
     #[arg(long)]
     pub single_node_mode: bool,
-
-    #[command(subcommand)]
-    pub command: Option<CliCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CliCommand {
-    /// Run the interactive UDS administration client.
-    Client {
-        #[command(subcommand)]
-        command: Option<ClientCommand>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -377,15 +383,15 @@ impl UploadConfig {
 }
 
 impl ServerConfig {
-    pub async fn load(cli: &Cli) -> Result<Self> {
-        let mut config = if let Some(path) = &cli.config {
+    pub async fn load(args: &ServerArgs) -> Result<Self> {
+        let mut config = if let Some(path) = &args.config {
             let text = tokio::fs::read_to_string(path).await?;
             toml::from_str::<ServerConfig>(&text)?
         } else {
             Self::development_default()
         };
 
-        if cli.single_node_mode {
+        if args.single_node_mode {
             config.mode = ServerMode::SingleNode;
         }
 
@@ -597,12 +603,54 @@ fn default_stats_rollup_interval_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
-    fn cli_can_force_single_node_mode() {
-        let mut config = ServerConfig::development_default();
-        config.mode = ServerMode::Fleet;
-        assert_eq!(config.mode, ServerMode::Fleet);
+    fn server_command_accepts_server_options() {
+        let cli = Cli::try_parse_from([
+            "uds",
+            "server",
+            "--config",
+            "/etc/uds/config.toml",
+            "--single-node-mode",
+        ])
+        .unwrap();
+
+        let Some(CliCommand::Server(args)) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(args.config, Some(PathBuf::from("/etc/uds/config.toml")));
+        assert!(args.single_node_mode);
+    }
+
+    #[test]
+    fn client_subcommands_still_parse() {
+        let cli = Cli::try_parse_from(["uds", "client", "upload"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Client {
+                command: Some(ClientCommand::Upload)
+            })
+        ));
+    }
+
+    #[test]
+    fn old_root_level_server_options_are_rejected() {
+        assert!(Cli::try_parse_from(["uds", "--single-node-mode"]).is_err());
+        assert!(Cli::try_parse_from(["uds", "--config", "config.toml"]).is_err());
+    }
+
+    #[test]
+    fn root_help_lists_available_commands() {
+        let mut help = Vec::new();
+        Cli::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("server"));
+        assert!(help.contains("Run the UDS update delivery server"));
+        assert!(help.contains("client"));
+        assert!(help.contains("Run the interactive UDS administration client"));
     }
 
     #[test]

@@ -27,7 +27,7 @@ mode = "off"
 Start UDS:
 
 ```bash
-uds --config /etc/uds/config.toml --single-node-mode
+uds server --config /etc/uds/config.toml --single-node-mode
 ```
 
 Use `tls.mode = "off"` only when TLS is terminated by a reverse proxy or load balancer. If UDS is exposed directly, configure TLS certificate files.
@@ -317,7 +317,7 @@ Wants=network-online.target
 Type=simple
 User=uds
 Group=uds
-ExecStart=/usr/local/bin/uds --config /etc/uds/config.toml
+ExecStart=/usr/local/bin/uds server --config /etc/uds/config.toml
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -390,5 +390,5 @@ cargo test
 Run locally:
 
 ```bash
-cargo run --bin uds -- --single-node-mode
+cargo run --bin uds -- server --single-node-mode
 ```

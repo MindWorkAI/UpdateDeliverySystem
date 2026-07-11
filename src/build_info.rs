@@ -52,14 +52,15 @@ mod tests {
         let output = banner();
         assert_eq!(
             output,
-            r#" _   _ ____  ____  
-| | | |  _ \/ ___|
-| | | | | | \___ \
-| |_| | |_| |___) |
- \___/|____/|____/ 
+            r#"
+    _   _ ____  ____
+   | | | |  _ \/ ___|
+   | | | | | | \___ \
+   | |_| | |_| |___) |
+    \___/|____/|____/
 
-MindWork AI Studio · Update Delivery System
-v26.7.1 · build 1
+   MindWork AI Studio · Update Delivery System
+   v26.7.1 · build 1
 
 "#
         );

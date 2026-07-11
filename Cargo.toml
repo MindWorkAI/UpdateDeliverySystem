@@ -18,12 +18,14 @@ async-stream = "0.3"
 axum = { version = "0.8", features = ["macros", "multipart"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
+base64 = "0.22"
 crossterm = "0.29"
 clap = { version = "4.5", features = ["derive"] }
 directories = "6"
 futures-util = "0.3"
 flexi_logger = { version = "0.31", default-features = false }
 hex = "0.4"
+getrandom = "0.4"
 inquire = "0.9"
 libc = "0.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "multipart", "rustls", "stream"] }
@@ -42,6 +44,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

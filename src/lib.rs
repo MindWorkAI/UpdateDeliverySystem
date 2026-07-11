@@ -3,6 +3,7 @@
 //! The binary crate wires these modules together. Tests use the library entry
 //! points directly so route behavior can be verified without binding sockets.
 
+pub mod auth;
 pub mod build_info;
 pub mod changelog;
 pub mod client;

@@ -62,6 +62,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     )
     .await?;
     let cluster = ClusterState::new(&config).await?;
+    let auth = update_delivery_system::auth::AdminTokenStore::open(&config.data_dir).await?;
     tracing::info!(
         mode = ?config.mode,
         public_base_url = %config.public_base_url,
@@ -86,6 +87,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
         cluster,
         logging: logging.clone(),
         shutdown: shutdown.clone(),
+        auth: Arc::new(auth),
     };
     let stats = state.stats.clone();
     warn_insecure_listener("public", config.public_api.bind, &config.public_api.tls);

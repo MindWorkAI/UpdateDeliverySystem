@@ -28,7 +28,7 @@ Create a configuration file:
 mode = "single-node"
 public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
-admin_token = "replace-with-a-long-random-admin-token"
+owner_token_verifier = "sha512:<128-lowercase-hex-characters>"
 channels = ["stable", "beta", "experimental", "mature"]
 
 [public_api]
@@ -58,7 +58,7 @@ TLS is configured independently per listener. Use `mode = "off"` on a non-loopba
 mode = "fleet"
 public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
-admin_token = "replace-with-a-long-random-admin-token"
+owner_token_verifier = "sha512:<128-lowercase-hex-characters>"
 cluster_token = "replace-with-a-long-random-cluster-token"
 channels = ["stable", "beta", "experimental", "mature"]
 
@@ -213,9 +213,13 @@ uds client withdraw
 uds client copy
 uds client stats
 uds client logs
+uds client tokens list
+uds client tokens create
+uds client tokens enable <uuid>
+uds client tokens disable <uuid>
 ```
 
-The first client run offers to create a local profile. The profile stores the UDS base URL, admin token, and default channel in a user-local config file. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
+The first client run offers to create a local profile. The profile stores the UDS base URL, one personal admin token, and the default channel in a user-local config file. Owner tokens are never stored in client profiles or any separate client configuration. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
 
 ### Configure the Client
 
@@ -293,7 +297,7 @@ The log viewer streams logs from the Admin API and colorizes them locally when t
 
 ## Administration API Reference
 
-The client uses the following Admin API endpoints. All administration requests require `Authorization: Bearer <admin_token>`.
+Normal administration accepts either an enabled `uds_admin_v1_…` token or the break-glass `uds_owner_v1_…` token in `Authorization: Bearer <token>`.
 
 - `GET /admin/v1/channels/{channel}/releases`
 - `POST /admin/v1/channels/{channel}/releases`
@@ -304,6 +308,14 @@ The client uses the following Admin API endpoints. All administration requests r
 - `GET /admin/v1/upload-policy`
 - `GET /admin/v1/logs/recent?lines=200`
 - `GET /admin/v1/logs/stream?lines=100`
+
+The following token-management endpoints accept only the owner token. A valid admin token receives `403`; missing or invalid credentials receive `401`. Their responses include `Cache-Control: no-store` and never expose stored verifiers.
+
+- `GET /admin/v1/admin-tokens`
+- `POST /admin/v1/admin-tokens` with `{ "name": "…", "reason": "…" }`
+- `PATCH /admin/v1/admin-tokens/{uuid}` with `{ "enabled": false, "reason": "…" }`
+
+The creation response is the only place the new token secret appears. Names and creation reasons are immutable. Every real enable/disable transition appends its required reason to immutable history; repeating the current state is idempotent.
 
 Log API responses use newline-delimited JSON (`application/x-ndjson`) and require file logging plus `logging.admin_api.enabled = true`.
 
@@ -398,7 +410,7 @@ Recommended fleet layout:
 - Back up every node's `data_dir`, or use storage-level replication if your platform provides it.
 - Terminate HTTP/3 at the load balancer if needed.
 
-The internal peer API is enabled only in fleet mode and uses `cluster_token`. Do not expose internal endpoints to the public internet.
+The internal peer API is enabled only in fleet mode and uses `cluster_token`. Token-store synchronization uses `/fleet/v1/auth/admin-tokens`; it includes verifiers and must never be exposed outside the protected fleet network. Do not expose internal endpoints to the public internet.
 
 ## Storage Layout
 
@@ -420,6 +432,8 @@ stats/
   events/
   processing/
   rollups/
+auth/
+  admin-tokens.json
 node-id
 ```
 
@@ -429,8 +443,11 @@ Statistics are best effort and never make update checks or downloads fail. Event
 
 ## Security Notes
 
-- Generate long random `admin_token` and `cluster_token` values.
-- Rotate tokens during maintenance windows and update every node consistently.
+- Let `uds server configure` generate the 512-bit owner secret. It prints the owner token exactly once and stores only its `sha512:` verifier; put the token in a password manager.
+- Owners should use personal admin tokens for daily work. Fetch the owner token only to run `uds client tokens …`; the prompt is hidden and no command-line owner-token option exists.
+- Admin-token secrets are generated server-side with 512 bits of randomness, returned once, and represented at rest only by versioned SHA-512 verifiers. The auth directory and store use private permissions and atomic replacement.
+- Never log tokens, secrets, or verifiers. Deactivated-token attempts are security events containing only the token ID.
+- Generate a long random `cluster_token` and update every fleet node consistently.
 - Use HTTPS for public traffic. Plain HTTP is appropriate only behind trusted TLS termination.
 - Keep `data_dir` private and backed up.
 - Never place real tokens in scripts committed to version control.

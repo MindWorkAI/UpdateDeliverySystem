@@ -2,13 +2,17 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, header};
 
+use crate::auth::{ActorIdentity, verify_owner};
 use crate::config::LogLevel;
 use crate::errors::UdsError;
 use crate::logging::{LogEventKind, RequestMetadata};
 use crate::routes::AppState;
 
-#[derive(Debug, Clone, Copy)]
-pub struct AdminAuth;
+#[derive(Debug, Clone)]
+pub struct AdminAuth(pub ActorIdentity);
+
+#[derive(Debug, Clone)]
+pub struct OwnerAuth(pub ActorIdentity);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterAuth;
@@ -19,12 +23,58 @@ impl FromRequestParts<AppState> for AdminAuth {
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
-    ) -> std::result::Result<Self, Self::Rejection> {
-        if let Err(reason) = require_bearer(&parts.headers, &state.config.admin_token) {
-            security_failure(parts, state, "admin", reason);
+    ) -> Result<Self, Self::Rejection> {
+        let Some(token) = bearer(&parts.headers) else {
+            security_failure(parts, state, "admin", "missing");
+            return Err(UdsError::Unauthorized);
+        };
+        if verify_owner(token, &state.config.owner_token_verifier) {
+            let actor = ActorIdentity::owner();
+            record_actor(parts, &actor);
+            return Ok(Self(actor));
+        }
+        if let Some((actor, enabled)) = state.auth.authenticate(token).await {
+            if enabled {
+                record_actor(parts, &actor);
+                return Ok(Self(actor));
+            }
+            disabled_token(parts, state, actor.token_id.expect("admin actor has id"));
+            security_failure(parts, state, "admin", "disabled");
             return Err(UdsError::Unauthorized);
         }
-        Ok(Self)
+        security_failure(parts, state, "admin", "invalid");
+        Err(UdsError::Unauthorized)
+    }
+}
+
+impl FromRequestParts<AppState> for OwnerAuth {
+    type Rejection = UdsError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(token) = bearer(&parts.headers) else {
+            security_failure(parts, state, "owner", "missing");
+            return Err(UdsError::Unauthorized);
+        };
+        if verify_owner(token, &state.config.owner_token_verifier) {
+            let actor = ActorIdentity::owner();
+            record_actor(parts, &actor);
+            return Ok(Self(actor));
+        }
+        if state.auth.authenticate(token).await.is_some() {
+            return Err(UdsError::Forbidden);
+        }
+        security_failure(parts, state, "owner", "invalid");
+        Err(UdsError::Unauthorized)
+    }
+}
+
+fn record_actor(parts: &Parts, actor: &ActorIdentity) {
+    if let Some(request) = parts.extensions.get::<RequestMetadata>()
+        && let Ok(mut slot) = request.actor.lock()
+    {
+        *slot = Some(actor.clone());
     }
 }
 
@@ -34,7 +84,7 @@ impl FromRequestParts<AppState> for ClusterAuth {
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
-    ) -> std::result::Result<Self, Self::Rejection> {
+    ) -> Result<Self, Self::Rejection> {
         let Some(token) = &state.config.cluster_token else {
             security_failure(parts, state, "cluster", "invalid");
             return Err(UdsError::Unauthorized);
@@ -50,7 +100,7 @@ impl FromRequestParts<AppState> for ClusterAuth {
 fn require_bearer(
     headers: &HeaderMap,
     expected_token: &str,
-) -> std::result::Result<(), &'static str> {
+) -> Result<(), &'static str> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err("missing");
     };
@@ -68,6 +118,33 @@ fn require_bearer(
     } else {
         Err("invalid")
     }
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+fn disabled_token(parts: &Parts, state: &AppState, id: uuid::Uuid) {
+    let request = parts.extensions.get::<RequestMetadata>();
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        "security_action".into(),
+        serde_json::Value::from("disabled_token_used"),
+    );
+    fields.insert("token_id".into(), serde_json::Value::from(id.to_string()));
+    let event = state.logging.event(
+        LogLevel::Warn,
+        LogEventKind::Security,
+        "uds::security",
+        request,
+        fields,
+        "disabled admin token used",
+    );
+    state.logging.emit(&event);
 }
 
 fn security_failure(parts: &Parts, state: &AppState, scope: &str, reason: &str) {

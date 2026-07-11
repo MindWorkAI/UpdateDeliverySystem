@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::multipart::{Form, Part};
 
+use crate::auth::AdminTokenMetadata;
 use crate::client::config::ClientProfile;
 use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
@@ -13,6 +14,20 @@ use crate::models::{
     ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy,
 };
 use crate::stats::ChannelStats;
+use zeroize::Zeroize;
+
+#[derive(serde::Deserialize)]
+pub struct CreatedAdminToken {
+    #[serde(flatten)]
+    pub metadata: AdminTokenMetadata,
+    pub token: String,
+}
+
+impl Drop for AdminClient {
+    fn drop(&mut self) {
+        self.admin_token.zeroize();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AdminClient {
@@ -23,6 +38,14 @@ pub struct AdminClient {
 
 impl AdminClient {
     pub fn new(profile: &ClientProfile) -> Result<Self> {
+        Self::with_token(profile, profile.admin_token.clone())
+    }
+
+    pub fn with_owner_token(profile: &ClientProfile, owner_token: String) -> Result<Self> {
+        Self::with_token(profile, owner_token)
+    }
+
+    fn with_token(profile: &ClientProfile, admin_token: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("uds-client")
             .connect_timeout(Duration::from_secs(15))
@@ -31,8 +54,31 @@ impl AdminClient {
         Ok(Self {
             http,
             base_url: profile.base_url.trim_end_matches('/').to_string(),
-            admin_token: profile.admin_token.clone(),
+            admin_token,
         })
+    }
+
+    pub async fn admin_tokens(&self) -> Result<Vec<AdminTokenMetadata>> {
+        self.get_json("/admin/v1/admin-tokens").await
+    }
+    pub async fn create_admin_token(&self, name: &str, reason: &str) -> Result<CreatedAdminToken> {
+        self.post_json(
+            "/admin/v1/admin-tokens",
+            &serde_json::json!({"name": name, "reason": reason}),
+        )
+        .await
+    }
+    pub async fn set_admin_token_enabled(
+        &self,
+        id: uuid::Uuid,
+        enabled: bool,
+        reason: &str,
+    ) -> Result<AdminTokenMetadata> {
+        self.patch_json(
+            &format!("/admin/v1/admin-tokens/{id}"),
+            &serde_json::json!({"enabled": enabled, "reason": reason}),
+        )
+        .await
     }
 
     pub async fn list_releases(&self, channel: &str) -> Result<ReleaseListResponse> {

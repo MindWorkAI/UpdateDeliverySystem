@@ -6,9 +6,11 @@ use crate::client::api::{AdminClient, display_path};
 use crate::client::config::{ClientConfig, ClientProfile, load_or_default, save};
 use crate::client::import::{PreparedUpload, prepare_from_local, prepare_from_remote};
 use crate::config::ClientCommand;
+use crate::config::TokenCommand;
 use crate::errors::{Result, UdsError};
 use crate::logging::{color_enabled, render_log_event, should_display_level};
 use crate::models::ReleaseListEntry;
+use zeroize::Zeroize;
 
 pub async fn run(command: Option<ClientCommand>) -> Result<()> {
     match command {
@@ -18,6 +20,7 @@ pub async fn run(command: Option<ClientCommand>) -> Result<()> {
         Some(ClientCommand::Copy) => copy().await,
         Some(ClientCommand::Changelog) => changelog().await,
         Some(ClientCommand::Stats) => stats().await,
+        Some(ClientCommand::Tokens { command }) => tokens(command).await,
         Some(ClientCommand::Logs {
             follow,
             lines,
@@ -26,6 +29,72 @@ pub async fn run(command: Option<ClientCommand>) -> Result<()> {
         }) => logs(follow, lines, level, no_color).await,
         None => main_menu().await,
     }
+}
+
+async fn tokens(command: TokenCommand) -> Result<()> {
+    let (_config, _profile_name, profile) = load_profile_or_configure().await?;
+    let mut owner_token = Password::new("Owner token:")
+        .without_confirmation()
+        .prompt()
+        .map_err(prompt_error)?;
+    let client = AdminClient::with_owner_token(&profile, owner_token.clone())?;
+    owner_token.zeroize();
+    match command {
+        TokenCommand::List => {
+            for token in client.admin_tokens().await? {
+                println!(
+                    "{}  {}  {}",
+                    token.id,
+                    if token.enabled { "enabled" } else { "disabled" },
+                    token.name
+                );
+                for entry in token.status_history {
+                    println!(
+                        "  {} {} — {}",
+                        entry.changed_at,
+                        if entry.enabled { "enabled" } else { "disabled" },
+                        entry.reason
+                    );
+                }
+            }
+        }
+        TokenCommand::Create => {
+            let name = Text::new("Token name:").prompt().map_err(prompt_error)?;
+            let reason = Text::new("Creation reason:")
+                .prompt()
+                .map_err(prompt_error)?;
+            let mut created = client.create_admin_token(&name, &reason).await?;
+            println!(
+                "Admin token {} created. This secret is shown exactly once:\n{}",
+                created.metadata.id, created.token
+            );
+            created.token.zeroize();
+        }
+        TokenCommand::Enable { id } => {
+            let enabled = true;
+            let reason = Text::new(if enabled {
+                "Reactivation reason:"
+            } else {
+                "Deactivation reason:"
+            })
+            .prompt()
+            .map_err(prompt_error)?;
+            let token = client.set_admin_token_enabled(id, enabled, &reason).await?;
+            println!(
+                "{} is now {}.",
+                token.id,
+                if token.enabled { "enabled" } else { "disabled" }
+            );
+        }
+        TokenCommand::Disable { id } => {
+            let reason = Text::new("Deactivation reason:")
+                .prompt()
+                .map_err(prompt_error)?;
+            let token = client.set_admin_token_enabled(id, false, &reason).await?;
+            println!("{} is now disabled.", token.id);
+        }
+    }
+    Ok(())
 }
 
 async fn main_menu() -> Result<()> {

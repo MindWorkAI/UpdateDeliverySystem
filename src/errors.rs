@@ -14,6 +14,12 @@ pub enum UdsError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("forbidden")]
+    Forbidden,
+
+    #[error("fleet confirmation unavailable")]
+    FleetUnavailable,
+
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
@@ -60,6 +66,8 @@ impl IntoResponse for UdsError {
         let status = match &self {
             UdsError::BadRequest(_) => StatusCode::BAD_REQUEST,
             UdsError::Unauthorized => StatusCode::UNAUTHORIZED,
+            UdsError::Forbidden => StatusCode::FORBIDDEN,
+            UdsError::FleetUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             UdsError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             UdsError::NotFound(_) => StatusCode::NOT_FOUND,
             UdsError::Conflict(_) => StatusCode::CONFLICT,
@@ -74,6 +82,11 @@ impl IntoResponse for UdsError {
         let (error, code) = match &self {
             UdsError::BadRequest(message) => (message.clone(), "bad_request"),
             UdsError::Unauthorized => ("unauthorized".into(), "unauthorized"),
+            UdsError::Forbidden => ("forbidden".into(), "forbidden"),
+            UdsError::FleetUnavailable => (
+                "fleet confirmation unavailable".into(),
+                "fleet_confirmation_unavailable",
+            ),
             UdsError::PayloadTooLarge(message) => (message.clone(), "payload_too_large"),
             UdsError::NotFound(message) => (message.clone(), "not_found"),
             UdsError::Conflict(message) => (message.clone(), "conflict"),

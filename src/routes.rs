@@ -16,7 +16,9 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
+use crate::auth::{AdminTokenMetadata, AdminTokenStore};
 use crate::cluster::ClusterState;
 use crate::config::LogLevel;
 use crate::config::ServerConfig;
@@ -29,7 +31,7 @@ use crate::models::{
     CatalogResponse, ChangelogPatchRequest, CopyReleaseRequest, MutationResponse,
     ReleaseUploadMetadata, ReplicationEvent, ReplicationEventType, UploadPolicy,
 };
-use crate::security::{AdminAuth, ClusterAuth};
+use crate::security::{AdminAuth, ClusterAuth, OwnerAuth};
 use crate::shutdown::{ShutdownState, TransferKind};
 use crate::stats::{ChannelStats, StatsEvent, StatsEventKind, StatsRecorder};
 use crate::storage::{StagedArtifact, Storage};
@@ -42,6 +44,7 @@ pub struct AppState {
     pub cluster: ClusterState,
     pub logging: Arc<LoggingRuntime>,
     pub shutdown: Arc<ShutdownState>,
+    pub auth: Arc<AdminTokenStore>,
 }
 
 pub fn build_public_router(state: AppState) -> Router {
@@ -93,6 +96,12 @@ pub fn build_admin_router(state: AppState) -> Router {
             post(copy_release),
         )
         .route("/admin/v1/channels/{channel}/stats", get(channel_stats));
+    router = router
+        .route(
+            "/admin/v1/admin-tokens",
+            get(list_admin_tokens).post(create_admin_token),
+        )
+        .route("/admin/v1/admin-tokens/{id}", patch(set_admin_token_status));
 
     if state.config.logging.admin_api.enabled && state.config.logging.file.enabled {
         router = router
@@ -100,7 +109,10 @@ pub fn build_admin_router(state: AppState) -> Router {
             .route("/admin/v1/logs/stream", get(stream_logs));
     }
 
-    apply_common_layers(router, state)
+    apply_common_layers(
+        router.layer(middleware::from_fn(no_store_token_responses)),
+        state,
+    )
 }
 
 pub fn build_fleet_router(state: AppState) -> Router {
@@ -108,10 +120,142 @@ pub fn build_fleet_router(state: AppState) -> Router {
         Router::new()
             .route("/health", get(health))
             .route("/fleet/v1/replication/events", post(replication_event))
+            .route(
+                "/fleet/v1/auth/admin-tokens",
+                get(fleet_admin_tokens).post(merge_fleet_admin_tokens),
+            )
             .route("/fleet/v1/catalog", get(catalog))
             .route("/fleet/v1/stats/local/{channel}", get(local_stats)),
         state,
     )
+}
+
+#[derive(serde::Deserialize)]
+struct CreateAdminTokenRequest {
+    name: String,
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SetAdminTokenStatusRequest {
+    enabled: bool,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreateAdminTokenResponse {
+    #[serde(flatten)]
+    metadata: AdminTokenMetadata,
+    token: String,
+}
+
+async fn list_admin_tokens(State(state): State<AppState>, _auth: OwnerAuth) -> Result<Response> {
+    no_store(Json(state.auth.list().await).into_response())
+}
+
+async fn create_admin_token(
+    State(state): State<AppState>,
+    _auth: OwnerAuth,
+    Extension(request_metadata): Extension<RequestMetadata>,
+    Json(request): Json<CreateAdminTokenRequest>,
+) -> Result<Response> {
+    let (metadata, mut token) = state.auth.create(request.name, request.reason).await?;
+    if !state
+        .cluster
+        .replicate_auth_snapshot(&state.auth.fleet_snapshot().await)
+        .await
+    {
+        token.zeroize();
+        return Err(UdsError::FleetUnavailable);
+    }
+    emit_token_audit(
+        &state,
+        &request_metadata,
+        "admin_token_created",
+        &metadata,
+        None,
+    );
+    no_store(Json(CreateAdminTokenResponse { metadata, token }).into_response())
+}
+
+async fn set_admin_token_status(
+    State(state): State<AppState>,
+    _auth: OwnerAuth,
+    Extension(request_metadata): Extension<RequestMetadata>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<SetAdminTokenStatusRequest>,
+) -> Result<Response> {
+    let reason = request.reason.clone();
+    let metadata = state
+        .auth
+        .set_enabled(id, request.enabled, request.reason)
+        .await?;
+    if !state
+        .cluster
+        .replicate_auth_snapshot(&state.auth.fleet_snapshot().await)
+        .await
+    {
+        return Err(UdsError::FleetUnavailable);
+    }
+    emit_token_audit(
+        &state,
+        &request_metadata,
+        "admin_token_status_changed",
+        &metadata,
+        Some(&reason),
+    );
+    no_store(Json(metadata).into_response())
+}
+
+fn no_store(mut response: Response) -> Result<Response> {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn no_store_token_responses(request: Request<Body>, next: Next) -> Response {
+    let token_management = request.uri().path().starts_with("/admin/v1/admin-tokens");
+    let mut response = next.run(request).await;
+    if token_management {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    response
+}
+
+fn emit_token_audit(
+    state: &AppState,
+    request: &RequestMetadata,
+    action: &str,
+    token: &AdminTokenMetadata,
+    reason: Option<&str>,
+) {
+    let mut fields = BTreeMap::new();
+    fields.insert("audit_action".into(), serde_json::Value::from(action));
+    fields.insert("actor_type".into(), serde_json::Value::from("owner"));
+    fields.insert(
+        "target_token_id".into(),
+        serde_json::Value::from(token.id.to_string()),
+    );
+    fields.insert(
+        "target_token_name".into(),
+        serde_json::Value::from(token.name.clone()),
+    );
+    fields.insert("enabled".into(), serde_json::Value::from(token.enabled));
+    if let Some(reason) = reason {
+        fields.insert("reason".into(), serde_json::Value::from(reason));
+    }
+    let event = state.logging.event(
+        LogLevel::Info,
+        LogEventKind::Audit,
+        "uds::audit",
+        Some(request),
+        fields,
+        "admin token lifecycle changed",
+    );
+    state.logging.emit(&event);
 }
 
 fn apply_common_layers(router: Router<AppState>, state: AppState) -> Router {
@@ -185,6 +329,7 @@ async fn request_logging(
         socket_ip,
         method: request.method().to_string(),
         route,
+        actor: Default::default(),
     };
     request.extensions_mut().insert(metadata.clone());
     let started = std::time::Instant::now();
@@ -225,6 +370,29 @@ async fn request_logging(
         "latency_ms".into(),
         serde_json::Value::from(started.elapsed().as_millis() as u64),
     );
+    if let Ok(actor) = metadata.actor.lock()
+        && let Some(actor) = actor.as_ref()
+    {
+        fields.insert(
+            "actor_type".into(),
+            serde_json::Value::from(match actor.actor_type {
+                crate::auth::ActorType::Owner => "owner",
+                crate::auth::ActorType::Admin => "admin",
+            }),
+        );
+        if let Some(id) = actor.token_id {
+            fields.insert(
+                "actor_token_id".into(),
+                serde_json::Value::from(id.to_string()),
+            );
+        }
+        if let Some(name) = &actor.token_name {
+            fields.insert(
+                "actor_token_name".into(),
+                serde_json::Value::from(name.clone()),
+            );
+        }
+    }
     if let Some(size) = response.body().size_hint().exact() {
         fields.insert("response_size".into(), serde_json::Value::from(size));
     }
@@ -654,6 +822,22 @@ async fn replication_event(_auth: ClusterAuth, Json(_event): Json<ReplicationEve
     StatusCode::ACCEPTED
 }
 
+async fn fleet_admin_tokens(
+    State(state): State<AppState>,
+    _auth: ClusterAuth,
+) -> Json<Vec<crate::auth::AdminTokenRecord>> {
+    Json(state.auth.fleet_snapshot().await)
+}
+
+async fn merge_fleet_admin_tokens(
+    State(state): State<AppState>,
+    _auth: ClusterAuth,
+    Json(records): Json<Vec<crate::auth::AdminTokenRecord>>,
+) -> Result<StatusCode> {
+    state.auth.merge(records).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 struct StagedMultipart {
     _temp_dir: tempfile::TempDir,
     metadata: ReleaseUploadMetadata,
@@ -820,6 +1004,7 @@ mod tests {
         );
         let cluster = ClusterState::new(&config).await.unwrap();
         let shutdown = Arc::new(ShutdownState::default());
+        let auth = Arc::new(AdminTokenStore::open(&config.data_dir).await.unwrap());
         let state = AppState {
             config: Arc::new(config),
             storage: Arc::new(storage),
@@ -827,6 +1012,7 @@ mod tests {
             cluster,
             logging: Arc::new(LoggingRuntime::disabled()),
             shutdown: shutdown.clone(),
+            auth,
         };
         let public = build_public_router(state.clone());
         let admin = build_admin_router(state.clone());
@@ -860,7 +1046,10 @@ mod tests {
         router
             .oneshot(
                 Request::post("/admin/v1/channels/stable/releases")
-                    .header(header::AUTHORIZATION, "Bearer change-me-admin-token")
+                    .header(
+                        header::AUTHORIZATION,
+                        "Bearer uds_owner_v1_change-me-owner-token",
+                    )
                     .header(
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
@@ -940,6 +1129,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn owner_manages_tokens_and_admin_cannot_use_owner_api() {
+        let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
+        let create = admin
+            .clone()
+            .oneshot(
+                Request::post("/admin/v1/admin-tokens")
+                    .header(
+                        header::AUTHORIZATION,
+                        "Bearer uds_owner_v1_change-me-owner-token",
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Thorsten","reason":"daily administration"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        assert_eq!(create.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(create.into_body(), 8192).await.unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = created["token"].as_str().unwrap();
+        assert!(token.starts_with("uds_admin_v1_"));
+        assert!(created.get("verifier").is_none());
+
+        let forbidden = admin
+            .clone()
+            .oneshot(
+                Request::get("/admin/v1/admin-tokens")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let normal = admin
+            .oneshot(
+                Request::get("/admin/v1/upload-policy")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(normal.status(), StatusCode::OK);
     }
 
     #[tokio::test]

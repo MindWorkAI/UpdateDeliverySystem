@@ -51,10 +51,13 @@ pub async fn load_or_default() -> Result<ClientConfig> {
     }
     verify_private_permissions(&path).await?;
     let text = fs::read_to_string(path).await?;
-    Ok(toml::from_str(&text)?)
+    let config: ClientConfig = toml::from_str(&text)?;
+    validate_profiles(&config)?;
+    Ok(config)
 }
 
 pub async fn save(config: &ClientConfig) -> Result<PathBuf> {
+    validate_profiles(config)?;
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
@@ -67,6 +70,22 @@ pub async fn save(config: &ClientConfig) -> Result<PathBuf> {
     harden_file(&path).await?;
     verify_private_permissions(&path).await?;
     Ok(path)
+}
+
+fn validate_profiles(config: &ClientConfig) -> Result<()> {
+    for (name, profile) in &config.profiles {
+        if profile.admin_token.starts_with(crate::auth::OWNER_PREFIX) {
+            return Err(UdsError::Config(format!(
+                "profile '{name}' must not store an owner token"
+            )));
+        }
+        if !profile.admin_token.starts_with(crate::auth::ADMIN_PREFIX) {
+            return Err(UdsError::Config(format!(
+                "profile '{name}' must contain a uds_admin_v1 token"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

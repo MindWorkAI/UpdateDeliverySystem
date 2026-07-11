@@ -59,7 +59,7 @@ pub struct ConfigureServerArgs {
     pub config: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum ClientCommand {
     /// Create or update the local client configuration.
     Configure,
@@ -79,6 +79,12 @@ pub enum ClientCommand {
     /// Show channel statistics.
     Stats,
 
+    /// Manage personal admin tokens using the break-glass owner token.
+    Tokens {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+
     /// Show UDS service logs.
     Logs {
         /// Follow appended log events.
@@ -97,6 +103,18 @@ pub enum ClientCommand {
         #[arg(long)]
         no_color: bool,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum TokenCommand {
+    /// List token metadata and immutable status history.
+    List,
+    /// Create a personal or purpose-bound admin token.
+    Create,
+    /// Enable an admin token.
+    Enable { id: uuid::Uuid },
+    /// Disable an admin token.
+    Disable { id: uuid::Uuid },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
@@ -136,7 +154,7 @@ pub struct ServerConfig {
 
     pub public_base_url: String,
     pub data_dir: PathBuf,
-    pub admin_token: String,
+    pub owner_token_verifier: String,
 
     #[serde(default)]
     pub cluster_token: Option<String>,
@@ -466,7 +484,7 @@ impl ServerConfig {
             fleet_api: None,
             public_base_url: "http://127.0.0.1:8080".to_string(),
             data_dir: PathBuf::from("./uds-data"),
-            admin_token: "change-me-admin-token".to_string(),
+            owner_token_verifier: crate::auth::verifier("uds_owner_v1_change-me-owner-token"),
             cluster_token: None,
             channels: default_channels(),
             cluster: ClusterConfig::default(),
@@ -482,7 +500,7 @@ impl ServerConfig {
         let mut config = Self::development_default();
         config.public_base_url = "https://updates.example.org".to_string();
         config.data_dir = PathBuf::from("/var/lib/uds");
-        config.admin_token = String::new();
+        config.owner_token_verifier = String::new();
         config.cluster.node_id_path = config.data_dir.join("node-id");
         config
     }
@@ -494,9 +512,10 @@ impl ServerConfig {
             ));
         }
 
-        if self.admin_token.len() < 16 {
+        if !valid_sha512_verifier(&self.owner_token_verifier) {
             return Err(UdsError::Config(
-                "admin_token must contain at least 16 characters".to_string(),
+                "owner_token_verifier must use the format sha512:<128 lowercase hex characters>"
+                    .to_string(),
             ));
         }
 
@@ -588,6 +607,15 @@ impl ServerConfig {
     pub fn channel_is_allowed(&self, channel: &str) -> bool {
         self.channels.contains(channel)
     }
+}
+
+fn valid_sha512_verifier(value: &str) -> bool {
+    value.strip_prefix("sha512:").is_some_and(|digest| {
+        digest.len() == 128 // 512 Bit -> 64 Bytes -> 128 Hex Chars
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn validate_tls(tls: &TlsConfig, name: &str) -> Result<()> {
@@ -851,7 +879,7 @@ mod tests {
                 mode = "single-node"
                 public_base_url = "https://updates.example.org"
                 data_dir = "/var/lib/uds"
-                admin_token = "a-long-admin-token"
+                owner_token_verifier = "sha512:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
                 [public_api]
                 bind = "127.0.0.1:8080"

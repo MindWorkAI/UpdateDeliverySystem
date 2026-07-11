@@ -80,6 +80,7 @@ pub struct RequestMetadata {
     pub socket_ip: Option<IpAddr>,
     pub method: String,
     pub route: Option<String>,
+    pub actor: std::sync::Arc<std::sync::Mutex<Option<crate::auth::ActorIdentity>>>,
 }
 
 pub struct LoggingRuntime {
@@ -651,6 +652,7 @@ mod tests {
             socket_ip: Some("2001:db8::1".parse().unwrap()),
             method: "GET".into(),
             route: None,
+            actor: Default::default(),
         };
         for kind in [
             LogEventKind::Http,

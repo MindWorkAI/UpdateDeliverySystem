@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::auth::AdminTokenRecord;
 use crate::config::{ServerConfig, ServerMode};
 use crate::errors::Result;
 use crate::models::ReplicationEvent;
@@ -18,6 +19,7 @@ pub struct ClusterState {
     node_id: String,
     enabled: bool,
     peers: Arc<Mutex<BTreeSet<String>>>,
+    cluster_token: Option<String>,
 }
 
 impl ClusterState {
@@ -29,6 +31,7 @@ impl ClusterState {
             node_id,
             enabled,
             peers: Arc::new(Mutex::new(BTreeSet::new())),
+            cluster_token: config.cluster_token.clone(),
         })
     }
 
@@ -56,6 +59,34 @@ impl ClusterState {
 
     pub async fn peers(&self) -> Vec<String> {
         self.peers.lock().await.iter().cloned().collect()
+    }
+
+    pub async fn replicate_auth_snapshot(&self, records: &[AdminTokenRecord]) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let peers = self.peers().await;
+        let Some(token) = &self.cluster_token else {
+            return false;
+        };
+        let client = reqwest::Client::new();
+        for peer in peers {
+            let url = format!("{}/fleet/v1/auth/admin-tokens", peer.trim_end_matches('/'));
+            let Ok(response) = client
+                .post(url)
+                .bearer_auth(token)
+                .json(records)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+            else {
+                return false;
+            };
+            if !response.status().is_success() {
+                return false;
+            }
+        }
+        true
     }
 }
 

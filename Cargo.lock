@@ -2302,12 +2302,14 @@ dependencies = [
  "async-stream",
  "axum",
  "axum-server",
+ "base64",
  "bytes",
  "clap",
  "crossterm",
  "directories",
  "flexi_logger",
  "futures-util",
+ "getrandom 0.4.3",
  "hex",
  "inquire",
  "libc",
@@ -2328,6 +2330,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use inquire::{Confirm, Password, Select, Text};
+use inquire::{Confirm, Select, Text};
 use url::Url;
 
 use crate::config::{ConfigureServerArgs, ListenerConfig, ServerConfig, ServerMode, TlsMode};
@@ -40,8 +40,11 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
         ));
     }
     config.mode = ServerMode::SingleNode;
-    if config.admin_token.is_empty() {
-        config.admin_token = generate_token();
+    let mut new_owner_token = None;
+    if config.owner_token_verifier.is_empty() {
+        let token = crate::auth::generate_owner_token()?;
+        config.owner_token_verifier = crate::auth::verifier(&token);
+        new_owner_token = Some(token);
     }
 
     println!("UDS single-node configuration\n");
@@ -83,23 +86,14 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     }
 
     if original.is_some()
-        && Confirm::new("Replace the existing admin token with a newly generated token?")
+        && Confirm::new("Replace the existing owner token with a newly generated token?")
             .with_default(false)
             .prompt()
             .map_err(prompt_error)?
     {
-        config.admin_token = generate_token();
-    } else if original.is_none()
-        && Confirm::new("Enter an admin token instead of using the generated secure token?")
-            .with_default(false)
-            .prompt()
-            .map_err(prompt_error)?
-    {
-        config.admin_token = Password::new("Admin token (at least 16 characters):")
-            .with_display_mode(inquire::PasswordDisplayMode::Masked)
-            .with_custom_confirmation_message("Confirm admin token:")
-            .prompt()
-            .map_err(prompt_error)?;
+        let token = crate::auth::generate_owner_token()?;
+        config.owner_token_verifier = crate::auth::verifier(&token);
+        new_owner_token = Some(token);
     }
 
     if Confirm::new("Configure advanced logging, upload, statistics, and shutdown settings?")
@@ -125,6 +119,9 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
 
     let saved = atomic_save(&path, &config, 0o600)?;
     report_saved(&saved);
+    if let Some(token) = new_owner_token {
+        println!("\nOWNER TOKEN — shown once; store it in a password manager now:\n{token}\n");
+    }
 
     if systemd_available()
         && Confirm::new("Install or update the UDS systemd service now?")
@@ -478,7 +475,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 pub fn redacted_toml(config: &ServerConfig) -> Result<String> {
     let mut copy = config.clone();
-    copy.admin_token = "<redacted>".into();
+    copy.owner_token_verifier = "<redacted>".into();
     if copy.cluster_token.is_some() {
         copy.cluster_token = Some("<redacted>".into());
     }
@@ -821,13 +818,6 @@ fn parse_channels(value: &str) -> Result<BTreeSet<String>> {
     Ok(channels)
 }
 
-fn generate_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
-}
 fn display_optional_path(path: Option<&Path>) -> String {
     path.map(|p| p.display().to_string()).unwrap_or_default()
 }
@@ -903,7 +893,7 @@ mod tests {
         config.public_base_url = "https://updates.example.test".into();
         config.data_dir = root.join("data");
         config.cluster.node_id_path = config.data_dir.join("node-id");
-        config.admin_token = "a-very-long-secret-token".into();
+        config.owner_token_verifier = crate::auth::verifier("uds_owner_v1_test-secret");
         config
     }
 
@@ -913,7 +903,7 @@ mod tests {
         let mut config = valid_config(dir.path());
         config.cluster_token = Some("another-secret-token".into());
         let review = redacted_toml(&config).unwrap();
-        assert!(!review.contains("a-very-long-secret-token"));
+        assert!(!review.contains(&config.owner_token_verifier));
         assert!(!review.contains("another-secret-token"));
         assert!(review.contains("<redacted>"));
     }

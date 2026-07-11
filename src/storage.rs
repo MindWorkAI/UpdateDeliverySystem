@@ -1,3 +1,8 @@
+//! Release manifests and content-addressed artifact storage.
+//!
+//! UDS publishes manifests only after artifacts are verified and durably moved
+//! into blob storage, preventing clients from observing partial releases.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,11 +20,12 @@ use uuid::Uuid;
 
 use crate::errors::{Result, UdsError};
 use crate::models::{
-    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse,
-    ReleaseManifest, ReleaseUploadMetadata, TauriUpdateResponse, UploadPolicy,
+    CatalogEntry, CatalogResponse, PlatformArtifact, ReleaseListEntry, ReleaseListResponse, ReleaseManifest,
+    ReleaseUploadMetadata, TauriUpdateResponse, UploadPolicy,
 };
 
 #[derive(Debug, Clone)]
+/// Artifact streamed to a temporary file while an upload is being validated.
 pub struct StagedArtifact {
     pub field_name: String,
     pub path: PathBuf,
@@ -28,6 +34,7 @@ pub struct StagedArtifact {
 }
 
 #[derive(Debug, Clone)]
+/// File-system repository for release metadata and immutable artifact blobs.
 pub struct Storage {
     data_dir: PathBuf,
     public_base_url: Url,
@@ -36,9 +43,8 @@ pub struct Storage {
 
 impl Storage {
     pub async fn new(data_dir: PathBuf, public_base_url: String) -> Result<Self> {
-        let public_base_url = Url::parse(&public_base_url).map_err(|error| {
-            UdsError::Config(format!("public_base_url is not a valid URL: {error}"))
-        })?;
+        let public_base_url = Url::parse(&public_base_url)
+            .map_err(|error| UdsError::Config(format!("public_base_url is not a valid URL: {error}")))?;
         let storage = Self {
             data_dir,
             public_base_url,
@@ -133,12 +139,7 @@ impl Storage {
         }
     }
 
-    pub async fn patch_changelog(
-        &self,
-        channel: &str,
-        version: &str,
-        notes: String,
-    ) -> Result<ReleaseManifest> {
+    pub async fn patch_changelog(&self, channel: &str, version: &str, notes: String) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
         let _guard = self.mutation_lock.lock().await;
         let mut manifest = self.load_manifest(channel, &version).await?;
@@ -223,9 +224,7 @@ impl Storage {
         let artifact = offered_manifest
             .platforms
             .get(&platform_key)
-            .ok_or_else(|| {
-                UdsError::Storage("selected release is missing its platform artifact".to_string())
-            })?;
+            .ok_or_else(|| UdsError::Storage("selected release is missing its platform artifact".to_string()))?;
 
         let mut notes = String::new();
         for (_, manifest) in candidates
@@ -243,9 +242,9 @@ impl Storage {
 
         let mut url = self.public_base_url.clone();
         {
-            let mut segments = url.path_segments_mut().map_err(|_| {
-                UdsError::Config("public_base_url cannot be used as a hierarchical URL".to_string())
-            })?;
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| UdsError::Config("public_base_url cannot be used as a hierarchical URL".to_string()))?;
             segments.pop_if_empty();
             segments.extend([
                 "api",
@@ -412,9 +411,9 @@ impl Storage {
 
     async fn verify_staged_against_existing(&self, staged: &StagedArtifact) -> Result<()> {
         let path = self.blob_data_path(&staged.sha256);
-        let metadata = fs::metadata(&path).await.map_err(|error| {
-            UdsError::Storage(format!("blob {} is incomplete: {error}", staged.sha256))
-        })?;
+        let metadata = fs::metadata(&path)
+            .await
+            .map_err(|error| UdsError::Storage(format!("blob {} is incomplete: {error}", staged.sha256)))?;
         if metadata.len() != staged.size || sha256_file(&path).await? != staged.sha256 {
             return Err(UdsError::Storage(format!(
                 "blob {} failed integrity validation",
@@ -506,12 +505,7 @@ impl Storage {
         Ok(serde_json::from_slice(&fs::read(path).await?)?)
     }
 
-    async fn save_manifest(
-        &self,
-        channel: &str,
-        version: &str,
-        manifest: &ReleaseManifest,
-    ) -> Result<()> {
+    async fn save_manifest(&self, channel: &str, version: &str, manifest: &ReleaseManifest) -> Result<()> {
         atomic_write_json(self.manifest_path(channel, version), manifest).await
     }
 
@@ -537,9 +531,8 @@ impl Storage {
 
 pub fn parse_version(version: &str) -> Result<Version> {
     let normalized = version.trim().trim_start_matches('v');
-    Version::parse(normalized).map_err(|error| {
-        UdsError::BadRequest(format!("invalid semantic version '{version}': {error}"))
-    })
+    Version::parse(normalized)
+        .map_err(|error| UdsError::BadRequest(format!("invalid semantic version '{version}': {error}")))
 }
 
 fn normalize_version(version: &str) -> Result<String> {

@@ -1,3 +1,8 @@
+//! Owner and administrator token lifecycle and durable token metadata.
+//!
+//! UDS stores only token verifiers so a copied data directory cannot reveal
+//! credentials that grant administrative access.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,12 +23,14 @@ const VERIFIER_PREFIX: &str = "sha512:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Kind of authenticated administrator represented in audit events.
 pub enum ActorType {
     Owner,
     Admin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Authenticated caller identity propagated through protected handlers.
 pub struct ActorIdentity {
     pub actor_type: ActorType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +50,7 @@ impl ActorIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Immutable record of one administrator token status change.
 pub struct StatusHistoryEntry {
     pub enabled: bool,
     #[serde(with = "time::serde::rfc3339")]
@@ -52,6 +60,7 @@ pub struct StatusHistoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Persisted admin-token record replicated between UDS fleet nodes.
 pub struct AdminTokenRecord {
     pub id: Uuid,
     pub verifier: String,
@@ -66,6 +75,7 @@ pub struct AdminTokenRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Safe token metadata returned by APIs without the stored verifier.
 pub struct AdminTokenMetadata {
     pub id: Uuid,
     pub name: String,
@@ -118,6 +128,7 @@ impl From<&AdminTokenRecord> for AdminTokenMetadata {
 }
 
 #[derive(Debug, Clone)]
+/// Concurrent token repository backed by an atomically replaced JSON file.
 pub struct AdminTokenStore {
     path: PathBuf,
     records: Arc<RwLock<Vec<AdminTokenRecord>>>,
@@ -199,11 +210,7 @@ impl AdminTokenStore {
         self.records.read().await.clone()
     }
 
-    pub async fn create(
-        &self,
-        name: String,
-        reason: String,
-    ) -> Result<(AdminTokenMetadata, String)> {
+    pub async fn create(&self, name: String, reason: String) -> Result<(AdminTokenMetadata, String)> {
         require_text("name", &name)?;
         require_text("reason", &reason)?;
         let id = Uuid::new_v4();
@@ -227,12 +234,7 @@ impl AdminTokenStore {
         Ok((metadata, token))
     }
 
-    pub async fn set_enabled(
-        &self,
-        id: Uuid,
-        enabled: bool,
-        reason: String,
-    ) -> Result<AdminTokenMetadata> {
+    pub async fn set_enabled(&self, id: Uuid, enabled: bool, reason: String) -> Result<AdminTokenMetadata> {
         require_text("reason", &reason)?;
         let mut records = self.records.write().await;
         let record = records
@@ -322,8 +324,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut diff = left.len() ^ right.len();
     let length = left.len().max(right.len());
     for index in 0..length {
-        diff |= (left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0))
-            as usize;
+        diff |= (left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0)) as usize;
     }
     diff == 0
 }

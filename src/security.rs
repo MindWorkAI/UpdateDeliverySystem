@@ -1,3 +1,8 @@
+//! Axum authentication extractors for admin, owner, and fleet access.
+//!
+//! Central extractors keep authorization decisions consistent across route
+//! handlers and attach authenticated identities to audit metadata.
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, header};
@@ -9,21 +14,21 @@ use crate::logging::{LogEventKind, RequestMetadata};
 use crate::routes::AppState;
 
 #[derive(Debug, Clone)]
+/// Authenticated personal administrator accepted by protected admin routes.
 pub struct AdminAuth(pub ActorIdentity);
 
 #[derive(Debug, Clone)]
+/// Break-glass owner identity accepted by token-management routes.
 pub struct OwnerAuth(pub ActorIdentity);
 
 #[derive(Debug, Clone, Copy)]
+/// Marker proving that a request supplied the shared fleet credential.
 pub struct ClusterAuth;
 
 impl FromRequestParts<AppState> for AdminAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = bearer(&parts.headers) else {
             security_failure(parts, state, "admin", "missing");
             return Err(UdsError::Unauthorized);
@@ -49,10 +54,7 @@ impl FromRequestParts<AppState> for AdminAuth {
 
 impl FromRequestParts<AppState> for OwnerAuth {
     type Rejection = UdsError;
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = bearer(&parts.headers) else {
             security_failure(parts, state, "owner", "missing");
             return Err(UdsError::Unauthorized);
@@ -81,10 +83,7 @@ fn record_actor(parts: &Parts, actor: &ActorIdentity) {
 impl FromRequestParts<AppState> for ClusterAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = &state.config.cluster_token else {
             security_failure(parts, state, "cluster", "invalid");
             return Err(UdsError::Unauthorized);

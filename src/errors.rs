@@ -1,3 +1,8 @@
+//! Shared UDS error taxonomy and safe HTTP error conversion.
+//!
+//! Internal failures are mapped to stable status codes without leaking secrets
+//! or file-system details to remote callers.
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -7,6 +12,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, UdsError>;
 
 #[derive(Debug, Error)]
+/// Failures that can propagate across UDS service and route boundaries.
 pub enum UdsError {
     #[error("bad request: {0}")]
     BadRequest(String),
@@ -49,6 +55,7 @@ pub enum UdsError {
 }
 
 #[derive(Serialize)]
+/// Private wire wrapper used to serialize a safe HTTP error response.
 struct ErrorBody {
     error: String,
     code: &'static str,
@@ -56,6 +63,7 @@ struct ErrorBody {
 }
 
 #[derive(Debug, Clone)]
+/// Context retained after converting an internal error into an HTTP response.
 pub struct ErrorResponseMetadata {
     pub error_id: uuid::Uuid,
     pub internal: bool,

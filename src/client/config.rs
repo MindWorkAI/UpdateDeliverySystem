@@ -1,3 +1,5 @@
+//! Local administration-client profiles and persisted configuration.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +10,7 @@ use tokio::fs;
 use crate::errors::{Result, UdsError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Complete local client configuration containing named server profiles.
 pub struct ClientConfig {
     #[serde(default)]
     pub active_profile: Option<String>,
@@ -17,6 +20,7 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Connection information and credential for one UDS installation.
 pub struct ClientProfile {
     pub base_url: String,
     pub admin_token: String,
@@ -27,20 +31,21 @@ pub struct ClientProfile {
 
 impl ClientConfig {
     pub fn active_profile(&self) -> Result<(&str, &ClientProfile)> {
-        let name = self.active_profile.as_deref().ok_or_else(|| {
-            UdsError::Config("no active client profile is configured".to_string())
-        })?;
-        let profile = self.profiles.get(name).ok_or_else(|| {
-            UdsError::Config(format!("active client profile '{name}' does not exist"))
-        })?;
+        let name = self
+            .active_profile
+            .as_deref()
+            .ok_or_else(|| UdsError::Config("no active client profile is configured".to_string()))?;
+        let profile = self
+            .profiles
+            .get(name)
+            .ok_or_else(|| UdsError::Config(format!("active client profile '{name}' does not exist")))?;
         Ok((name, profile))
     }
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("org", "MindWork AI", "UDS").ok_or_else(|| {
-        UdsError::Config("could not determine the user configuration directory".to_string())
-    })?;
+    let dirs = ProjectDirs::from("org", "MindWork AI", "UDS")
+        .ok_or_else(|| UdsError::Config("could not determine the user configuration directory".to_string()))?;
     Ok(dirs.config_dir().join("client.toml"))
 }
 
@@ -153,9 +158,8 @@ async fn verify_private_permissions(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn harden_windows_path(path: &Path) -> Result<()> {
-    let username = std::env::var("USERNAME").map_err(|_| {
-        UdsError::Config("could not determine the current Windows user name".to_string())
-    })?;
+    let username = std::env::var("USERNAME")
+        .map_err(|_| UdsError::Config("could not determine the current Windows user name".to_string()))?;
     let status = std::process::Command::new("icacls")
         .arg(path)
         .arg("/inheritance:r")

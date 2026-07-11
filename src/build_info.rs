@@ -1,3 +1,5 @@
+//! Compile-time UDS version metadata and startup banner rendering.
+
 use std::io::{self, IsTerminal, Write};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -14,7 +16,8 @@ pub fn clap_version() -> String {
 }
 
 pub fn banner() -> String {
-    format!(r#"
+    format!(
+        r#"
     _   _ ____  ____
    | | | |  _ \/ ___|
    | | | | | | \___ \

@@ -1,3 +1,8 @@
+//! Interactive administration client for operators managing a UDS server.
+//!
+//! Local profiles and prompts stay separate from HTTP transport and release
+//! import preparation.
+
 mod api;
 mod config;
 mod import;

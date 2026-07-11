@@ -1,3 +1,8 @@
+//! Graceful shutdown coordination for active uploads and downloads.
+//!
+//! Transfer guards let UDS stop accepting new work while allowing in-flight
+//! traffic to finish until the configured deadline expires.
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -7,6 +12,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Network transfer categories tracked during graceful shutdown.
 pub enum TransferKind {
     Download,
     Upload,
@@ -22,6 +28,7 @@ impl TransferKind {
 }
 
 #[derive(Debug, Clone)]
+/// Metadata required to identify and audit an in-flight transfer.
 pub struct ActiveTransfer {
     pub transfer_id: Uuid,
     pub request_id: String,
@@ -31,12 +38,14 @@ pub struct ActiveTransfer {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+/// Lifetime counters used to summarize completed and aborted transfers.
 pub struct TransferTotals {
     pub completed: u64,
     pub aborted: u64,
 }
 
 #[derive(Debug, Default)]
+/// Shared state that coordinates listener draining and active transfers.
 pub struct ShutdownState {
     draining: AtomicBool,
     active: Mutex<BTreeMap<Uuid, ActiveTransfer>>,
@@ -159,6 +168,7 @@ impl ShutdownState {
     }
 }
 
+/// RAII guard that unregisters a transfer when its response body completes.
 pub struct TransferGuard {
     state: Arc<ShutdownState>,
     transfer_id: Uuid,

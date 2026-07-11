@@ -1,3 +1,5 @@
+//! Authenticated HTTP transport used by UDS administration workflows.
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
@@ -10,9 +12,7 @@ use crate::client::config::ClientProfile;
 use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
 use crate::logging::LogEventLine;
-use crate::models::{
-    ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy,
-};
+use crate::models::{ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy};
 use crate::stats::ChannelStats;
 use zeroize::Zeroize;
 
@@ -23,6 +23,7 @@ impl Drop for AdminClient {
 }
 
 #[derive(Debug, Clone)]
+/// API client bound to one configured UDS administration endpoint.
 pub struct AdminClient {
     http: reqwest::Client,
     base_url: String,
@@ -83,19 +84,14 @@ impl AdminClient {
         self.get_json("/admin/v1/upload-policy").await
     }
 
-    pub async fn upload_release(
-        &self,
-        channel: &str,
-        upload: &PreparedUpload,
-    ) -> Result<MutationResponse> {
+    pub async fn upload_release(&self, channel: &str, upload: &PreparedUpload) -> Result<MutationResponse> {
         let metadata = serde_json::to_string(&upload.metadata)?;
         let mut form = Form::new().text("metadata", metadata);
         for artifact in &upload.artifacts {
             let file = tokio::fs::File::open(&artifact.path).await?;
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = reqwest::Body::wrap_stream(stream);
-            let part =
-                Part::stream_with_length(body, artifact.size).file_name(artifact.file_name.clone());
+            let part = Part::stream_with_length(body, artifact.size).file_name(artifact.file_name.clone());
             form = form.part(artifact.field_name.clone(), part);
         }
 
@@ -111,12 +107,7 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
-    pub async fn patch_changelog(
-        &self,
-        channel: &str,
-        version: &str,
-        notes: String,
-    ) -> Result<MutationResponse> {
+    pub async fn patch_changelog(&self, channel: &str, version: &str, notes: String) -> Result<MutationResponse> {
         self.patch_json(
             &format!("/admin/v1/channels/{channel}/releases/{version}/changelog"),
             &ChangelogPatchRequest { notes },
@@ -247,11 +238,7 @@ impl AdminClient {
         parse_text_response(response).await
     }
 
-    async fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<R> {
+    async fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
         let response = self
             .http
             .post(self.url(path))
@@ -264,11 +251,7 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
-    async fn patch_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<R> {
+    async fn patch_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
         let response = self
             .http
             .patch(self.url(path))
@@ -290,9 +273,7 @@ pub fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-async fn parse_json_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
-) -> Result<T> {
+async fn parse_json_response<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
     let text = parse_text_response(response).await?;
     serde_json::from_str(&text).map_err(UdsError::Json)
 }

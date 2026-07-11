@@ -1,3 +1,8 @@
+//! Asynchronous update and download statistics recording.
+//!
+//! Request handlers enqueue small events while a background actor persists and
+//! rolls them up without adding file-system latency to client downloads.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,12 +20,14 @@ use crate::config::StatsConfig;
 use crate::errors::{Result, UdsError};
 
 #[derive(Debug, Clone)]
+/// Non-blocking facade used by request handlers to record and query statistics.
 pub struct StatsRecorder {
     sender: mpsc::Sender<StatsCommand>,
     dropping: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// One durable observation that contributes to channel statistics.
 pub struct StatsEvent {
     pub kind: StatsEventKind,
     pub channel: String,
@@ -32,12 +39,14 @@ pub struct StatsEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Request activity categories tracked by UDS.
 pub enum StatsEventKind {
     UpdateCheck,
     Download,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Aggregated update and download totals for one release channel.
 pub struct ChannelStats {
     pub update_checks: u64,
     pub downloads: u64,
@@ -46,12 +55,14 @@ pub struct ChannelStats {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Download totals and traffic volume for one platform key.
 pub struct PlatformStats {
     pub downloads: u64,
     pub traffic_bytes: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Durable bookkeeping used to resume aggregation after a restart.
 struct RollupState {
     #[serde(default)]
     channels: BTreeMap<String, ChannelStats>,
@@ -59,6 +70,7 @@ struct RollupState {
     included_deltas: BTreeSet<String>,
 }
 
+/// Commands serialized through the statistics actor.
 enum StatsCommand {
     Event(StatsEvent),
     Flush {
@@ -70,6 +82,7 @@ enum StatsCommand {
     },
 }
 
+/// Single-owner state machine responsible for statistics persistence.
 struct StatsActor {
     events_dir: PathBuf,
     processing_dir: PathBuf,
@@ -113,9 +126,9 @@ impl StatsRecorder {
             })
             .await
             .map_err(|_| UdsError::Storage("statistics recorder is unavailable".to_string()))?;
-        receiver.await.map_err(|_| {
-            UdsError::Storage("statistics recorder stopped before answering".to_string())
-        })?
+        receiver
+            .await
+            .map_err(|_| UdsError::Storage("statistics recorder stopped before answering".to_string()))?
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -124,9 +137,9 @@ impl StatsRecorder {
             .send(StatsCommand::Flush { response: sender })
             .await
             .map_err(|_| UdsError::Storage("statistics recorder is unavailable".to_string()))?;
-        receiver.await.map_err(|_| {
-            UdsError::Storage("statistics recorder stopped before flushing".to_string())
-        })
+        receiver
+            .await
+            .map_err(|_| UdsError::Storage("statistics recorder stopped before flushing".to_string()))
     }
 }
 
@@ -166,8 +179,7 @@ impl StatsActor {
     }
 
     async fn run(mut self, mut receiver: mpsc::Receiver<StatsCommand>) {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.config.rollup_interval_seconds));
+        let mut interval = tokio::time::interval(Duration::from_secs(self.config.rollup_interval_seconds));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
@@ -311,8 +323,7 @@ impl StatsActor {
             if state.included_deltas.contains(&id) {
                 continue;
             }
-            let delta: BTreeMap<String, ChannelStats> =
-                serde_json::from_slice(&fs::read(&path).await?)?;
+            let delta: BTreeMap<String, ChannelStats> = serde_json::from_slice(&fs::read(&path).await?)?;
             merge_stats(&mut state.channels, delta);
             included.insert(id);
         }
@@ -351,8 +362,7 @@ impl StatsActor {
             if state.included_deltas.contains(&id) {
                 continue;
             }
-            let delta: BTreeMap<String, ChannelStats> =
-                serde_json::from_slice(&fs::read(path).await?)?;
+            let delta: BTreeMap<String, ChannelStats> = serde_json::from_slice(&fs::read(path).await?)?;
             merge_stats(&mut totals, delta);
         }
         Ok(totals)
@@ -383,9 +393,7 @@ async fn reject_legacy_stats(stats_root: &Path) -> Result<()> {
 fn apply_event(rollup: &mut BTreeMap<String, ChannelStats>, event: StatsEvent) {
     let channel = rollup.entry(event.channel).or_default();
     match event.kind {
-        StatsEventKind::UpdateCheck => {
-            channel.update_checks = channel.update_checks.saturating_add(1)
-        }
+        StatsEventKind::UpdateCheck => channel.update_checks = channel.update_checks.saturating_add(1),
         StatsEventKind::Download => {
             channel.downloads = channel.downloads.saturating_add(1);
             channel.traffic_bytes = channel.traffic_bytes.saturating_add(event.bytes);
@@ -400,10 +408,7 @@ fn apply_event(rollup: &mut BTreeMap<String, ChannelStats>, event: StatsEvent) {
     }
 }
 
-fn merge_stats(
-    target: &mut BTreeMap<String, ChannelStats>,
-    source: BTreeMap<String, ChannelStats>,
-) {
+fn merge_stats(target: &mut BTreeMap<String, ChannelStats>, source: BTreeMap<String, ChannelStats>) {
     for (channel, source_stats) in source {
         let target_stats = target.entry(channel).or_default();
         target_stats.update_checks = target_stats

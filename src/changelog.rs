@@ -1,3 +1,8 @@
+//! Parsing and terminal browsing for the embedded UDS changelog.
+//!
+//! Embedding the changelog gives operators release information even when the
+//! server host has no browser or network access.
+
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
@@ -14,6 +19,7 @@ use semver::Version;
 use crate::build_info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Parsed changelog section for one released UDS version.
 pub struct Section<'a> {
     pub version: Version,
     pub markdown: &'a str,
@@ -26,8 +32,7 @@ pub fn parse<'a>(source: &'a str, expected: &str) -> anyhow::Result<Vec<Section<
             let value = line
                 .strip_prefix("# UDS v")
                 .with_context(|| format!("invalid level-1 changelog heading: {line}"))?;
-            let version = Version::parse(value)
-                .with_context(|| format!("invalid changelog version: {value}"))?;
+            let version = Version::parse(value).with_context(|| format!("invalid changelog version: {value}"))?;
             starts.push((offset, version));
         } else if line.starts_with('#') && !line.starts_with("##") {
             bail!("invalid level-1 changelog heading: {line}");
@@ -76,6 +81,7 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[derive(Debug, Default)]
+/// Scroll and selection state for the interactive changelog viewer.
 struct ViewerState {
     section: usize,
     scroll: usize,
@@ -95,6 +101,7 @@ impl ViewerState {
     }
 }
 
+/// Terminal-mode guard that restores the console when browsing ends.
 struct ViewerTerminal;
 
 impl ViewerTerminal {
@@ -172,13 +179,7 @@ fn wrapped_lines(markdown: &str, width: usize) -> Vec<String> {
     output
 }
 
-fn draw(
-    state: &ViewerState,
-    sections: &[Section<'_>],
-    lines: &[String],
-    width: u16,
-    height: u16,
-) -> io::Result<()> {
+fn draw(state: &ViewerState, sections: &[Section<'_>], lines: &[String], width: u16, height: u16) -> io::Result<()> {
     let mut stdout = io::stdout();
     queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
     let title = format!(

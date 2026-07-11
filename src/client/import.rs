@@ -1,3 +1,8 @@
+//! Release import preparation for Tauri manifests and local artifacts.
+//!
+//! External metadata is normalized before upload so the server receives a
+//! predictable multipart representation.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,6 +19,7 @@ use crate::errors::{Result, UdsError};
 use crate::models::{ReleaseUploadMetadata, UploadPlatformMetadata, UploadPolicy};
 
 #[derive(Debug, Deserialize)]
+/// Static update manifest format published by Tauri-compatible releases.
 pub struct TauriStaticRelease {
     pub version: String,
     #[serde(default)]
@@ -24,12 +30,14 @@ pub struct TauriStaticRelease {
 }
 
 #[derive(Debug, Deserialize)]
+/// Platform-specific entry inside a Tauri static update manifest.
 pub struct TauriStaticPlatform {
     pub url: String,
     pub signature: String,
 }
 
 #[derive(Debug)]
+/// Validated metadata and artifacts ready for an administrative upload.
 pub struct PreparedUpload {
     pub metadata: ReleaseUploadMetadata,
     pub artifacts: Vec<PreparedArtifact>,
@@ -37,6 +45,7 @@ pub struct PreparedUpload {
 }
 
 #[derive(Debug, Clone)]
+/// One local or downloaded artifact prepared for multipart streaming.
 pub struct PreparedArtifact {
     pub field_name: String,
     pub platform: String,
@@ -54,8 +63,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
         .build()
         .map_err(|error| UdsError::Config(format!("failed to create HTTP client: {error}")))?;
     let latest_json_url = normalize_github_release_url(input_url)?;
-    let release =
-        fetch_release_metadata(&client, latest_json_url.clone(), policy.max_metadata_bytes).await?;
+    let release = fetch_release_metadata(&client, latest_json_url.clone(), policy.max_metadata_bytes).await?;
     validate_platform_count(&release, policy)?;
     let temp_dir = tempfile::Builder::new()
         .prefix("uds-client-upload-")
@@ -67,9 +75,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
     for (index, (platform, platform_release)) in release.platforms.iter().enumerate() {
         let artifact_url = Url::parse(&platform_release.url)
             .or_else(|_| latest_json_url.join(&platform_release.url))
-            .map_err(|error| {
-                UdsError::BadRequest(format!("invalid artifact URL for {platform}: {error}"))
-            })?;
+            .map_err(|error| UdsError::BadRequest(format!("invalid artifact URL for {platform}: {error}")))?;
         let file_name = artifact_file_name(&artifact_url)?;
         let field_name = format!("artifact_{index}");
         let path = temp_dir.path().join(&field_name);
@@ -195,11 +201,7 @@ pub async fn prepare_from_local(
     })
 }
 
-async fn fetch_release_metadata(
-    client: &Client,
-    url: Url,
-    limit: u64,
-) -> Result<TauriStaticRelease> {
+async fn fetch_release_metadata(client: &Client, url: Url, limit: u64) -> Result<TauriStaticRelease> {
     let response = client
         .get(url)
         .timeout(Duration::from_secs(30))
@@ -219,8 +221,7 @@ async fn fetch_release_metadata(
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| UdsError::Storage(format!("failed to read latest.json: {error}")))?;
+        let chunk = chunk.map_err(|error| UdsError::Storage(format!("failed to read latest.json: {error}")))?;
         if bytes.len().saturating_add(chunk.len()) as u64 > limit {
             return Err(UdsError::PayloadTooLarge(
                 "latest.json exceeds the server's metadata limit".to_string(),
@@ -235,12 +236,7 @@ async fn fetch_release_metadata(
     })
 }
 
-async fn download_artifact(
-    client: &Client,
-    url: Url,
-    path: &Path,
-    limit: u64,
-) -> Result<(u64, String)> {
+async fn download_artifact(client: &Client, url: Url, path: &Path, limit: u64) -> Result<(u64, String)> {
     let response = client
         .get(url)
         .timeout(Duration::from_secs(30 * 60))
@@ -262,8 +258,7 @@ async fn download_artifact(
     let mut size = 0u64;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| UdsError::Storage(format!("failed to read artifact: {error}")))?;
+        let chunk = chunk.map_err(|error| UdsError::Storage(format!("failed to read artifact: {error}")))?;
         size = size.saturating_add(chunk.len() as u64);
         if size > limit {
             return Err(UdsError::PayloadTooLarge(
@@ -308,10 +303,7 @@ fn validate_platform_count(release: &TauriStaticRelease, policy: &UploadPolicy) 
     Ok(())
 }
 
-fn validate_serialized_metadata(
-    metadata: &ReleaseUploadMetadata,
-    policy: &UploadPolicy,
-) -> Result<()> {
+fn validate_serialized_metadata(metadata: &ReleaseUploadMetadata, policy: &UploadPolicy) -> Result<()> {
     if serde_json::to_vec(metadata)?.len() as u64 > policy.max_metadata_bytes {
         return Err(UdsError::PayloadTooLarge(
             "release metadata exceeds the server's metadata limit".to_string(),
@@ -321,8 +313,7 @@ fn validate_serialized_metadata(
 }
 
 pub fn normalize_github_release_url(input: &str) -> Result<Url> {
-    let url =
-        Url::parse(input).map_err(|error| UdsError::BadRequest(format!("invalid URL: {error}")))?;
+    let url = Url::parse(input).map_err(|error| UdsError::BadRequest(format!("invalid URL: {error}")))?;
     if url.path().ends_with("/latest.json") {
         return Ok(url);
     }
@@ -344,9 +335,8 @@ pub fn normalize_github_release_url(input: &str) -> Result<Url> {
         } else {
             format!("https://github.com/{owner}/{repo}/releases/{release_selector}")
         };
-        return Url::parse(&normalized).map_err(|error| {
-            UdsError::BadRequest(format!("invalid normalized GitHub URL: {error}"))
-        });
+        return Url::parse(&normalized)
+            .map_err(|error| UdsError::BadRequest(format!("invalid normalized GitHub URL: {error}")));
     }
     Ok(url)
 }
@@ -356,9 +346,7 @@ fn artifact_file_name(url: &Url) -> Result<String> {
         .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            UdsError::BadRequest(format!("could not determine artifact file name from {url}"))
-        })
+        .ok_or_else(|| UdsError::BadRequest(format!("could not determine artifact file name from {url}")))
 }
 
 #[cfg(test)]
@@ -367,9 +355,7 @@ mod tests {
 
     #[test]
     fn normalizes_github_latest_release_url() {
-        let url =
-            normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/latest")
-                .unwrap();
+        let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/latest").unwrap();
         assert_eq!(
             url.as_str(),
             "https://github.com/MindWorkAI/AI-Studio/releases/latest/download/latest.json"
@@ -378,10 +364,7 @@ mod tests {
 
     #[test]
     fn normalizes_github_tag_url() {
-        let url = normalize_github_release_url(
-            "https://github.com/MindWorkAI/AI-Studio/releases/tag/v26.7.2",
-        )
-        .unwrap();
+        let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/tag/v26.7.2").unwrap();
         assert_eq!(
             url.as_str(),
             "https://github.com/MindWorkAI/AI-Studio/releases/download/v26.7.2/latest.json"

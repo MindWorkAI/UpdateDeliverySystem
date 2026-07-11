@@ -1,124 +1,24 @@
+//! Server configuration schema, defaults, loading, and validation.
+//!
+//! UDS validates configuration before starting any listener so later runtime
+//! code can rely on security-sensitive invariants.
+
+mod cli;
+
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, UdsError};
 
-#[derive(Debug, Parser)]
-#[command(name = "uds", version = crate::build_info::CLAP_VERSION)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<CliCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CliCommand {
-    /// Show UDS version and build information.
-    Version,
-
-    /// Browse the embedded UDS changelog.
-    Changelog,
-
-    /// Run the UDS update delivery server.
-    Server(ServerArgs),
-
-    /// Run the interactive UDS administration client.
-    Client {
-        #[command(subcommand)]
-        command: Option<ClientCommand>,
-    },
-}
-
-#[derive(Debug, Args)]
-pub struct ServerArgs {
-    /// Path to a TOML configuration file.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-
-    /// Force single-node mode and disable peer discovery and replication.
-    #[arg(long)]
-    pub single_node_mode: bool,
-
-    #[command(subcommand)]
-    pub command: Option<ServerCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ServerCommand {
-    /// Interactively create or update a single-node server configuration.
-    Configure(ConfigureServerArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct ConfigureServerArgs {
-    /// Path to the TOML configuration file to create or update.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Subcommand)]
-pub enum ClientCommand {
-    /// Create or update the local client configuration.
-    Configure,
-
-    /// Upload a release to UDS.
-    Upload,
-
-    /// Withdraw a release from a channel.
-    Withdraw,
-
-    /// Copy a release from one channel to another.
-    Copy,
-
-    /// Update the changelog for an existing release.
-    Changelog,
-
-    /// Show channel statistics.
-    Stats,
-
-    /// Manage personal admin tokens using the break-glass owner token.
-    Tokens {
-        #[command(subcommand)]
-        command: TokenCommand,
-    },
-
-    /// Show UDS service logs.
-    Logs {
-        /// Follow appended log events.
-        #[arg(long)]
-        follow: bool,
-
-        /// Number of recent log lines to show first.
-        #[arg(long, default_value_t = 200)]
-        lines: usize,
-
-        /// Minimum level to display locally.
-        #[arg(long)]
-        level: Option<LogLevel>,
-
-        /// Disable local terminal colors.
-        #[arg(long)]
-        no_color: bool,
-    },
-}
-
-#[derive(Debug, Clone, Subcommand)]
-pub enum TokenCommand {
-    /// List token metadata and immutable status history.
-    List,
-    /// Create a personal or purpose-bound admin token.
-    Create,
-    /// Enable an admin token.
-    Enable { id: uuid::Uuid },
-    /// Disable an admin token.
-    Disable { id: uuid::Uuid },
-}
+pub use cli::{Cli, CliCommand, ClientCommand, ConfigureServerArgs, ServerArgs, ServerCommand, TokenCommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
+/// Severity threshold shared by server logging and client-side filtering.
 pub enum LogLevel {
     Trace,
     Debug,
@@ -129,6 +29,7 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+/// Deployment topology that controls whether fleet-only services are enabled.
 pub enum ServerMode {
     Fleet,
     SingleNode,
@@ -136,6 +37,7 @@ pub enum ServerMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+/// TLS provisioning strategy for one HTTP listener.
 pub enum TlsMode {
     Off,
     Files,
@@ -143,6 +45,7 @@ pub enum TlsMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Complete validated configuration required to run a UDS server node.
 pub struct ServerConfig {
     #[serde(default = "default_mode")]
     pub mode: ServerMode,
@@ -179,6 +82,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Network binding and TLS settings shared by the public and admin APIs.
 pub struct ListenerConfig {
     pub bind: SocketAddr,
     #[serde(default)]
@@ -186,6 +90,7 @@ pub struct ListenerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Private listener and advertised URL used for node-to-node fleet traffic.
 pub struct FleetApiConfig {
     pub bind: SocketAddr,
     pub fleet_base_url: String,
@@ -194,6 +99,7 @@ pub struct FleetApiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Resource limits protecting the server from oversized release uploads.
 pub struct UploadConfig {
     #[serde(default = "default_max_artifact_size_mb")]
     pub max_artifact_size_mb: u64,
@@ -209,6 +115,7 @@ pub struct UploadConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Queue and rollup tuning for asynchronous usage statistics.
 pub struct StatsConfig {
     #[serde(default = "default_stats_queue_capacity")]
     pub queue_capacity: usize,
@@ -224,12 +131,14 @@ pub struct StatsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Graceful-shutdown timing applied when listeners begin draining.
 pub struct ShutdownConfig {
     #[serde(default = "default_shutdown_grace_period_seconds")]
     pub grace_period_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Certificate configuration for one HTTPS listener.
 pub struct TlsConfig {
     #[serde(default = "default_tls_mode")]
     pub mode: TlsMode,
@@ -251,6 +160,7 @@ pub struct TlsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Node identity, discovery, and reconciliation settings for fleet mode.
 pub struct ClusterConfig {
     #[serde(default = "default_node_id_path")]
     pub node_id_path: PathBuf,
@@ -266,6 +176,7 @@ pub struct ClusterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Structured logging destinations and privacy controls.
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -288,6 +199,7 @@ pub struct LoggingConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+/// Privacy policy controlling when request logs may contain client IPs.
 pub enum ClientIpLoggingMode {
     Never,
     #[default]
@@ -296,6 +208,7 @@ pub enum ClientIpLoggingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Human-readable console logging settings.
 pub struct LoggingConsoleConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -305,6 +218,7 @@ pub struct LoggingConsoleConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Rotating NDJSON file logging settings.
 pub struct LoggingFileConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -320,6 +234,7 @@ pub struct LoggingFileConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Controls whether authenticated administrators may query stored logs.
 pub struct LoggingAdminApiConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -327,6 +242,7 @@ pub struct LoggingAdminApiConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+/// Policy for enabling ANSI colors in human-readable log output.
 pub enum LoggingColorMode {
     #[default]
     Auto,
@@ -432,18 +348,15 @@ impl UploadConfig {
         let max_artifact_bytes = self
             .max_artifact_size_mb
             .checked_mul(1024 * 1024)
-            .ok_or_else(|| {
-                UdsError::Config("upload.max_artifact_size_mb is too large".to_string())
-            })?;
+            .ok_or_else(|| UdsError::Config("upload.max_artifact_size_mb is too large".to_string()))?;
         let max_total_artifact_bytes = self
             .max_total_artifact_size_mb
             .checked_mul(1024 * 1024)
-            .ok_or_else(|| {
-                UdsError::Config("upload.max_total_artifact_size_mb is too large".to_string())
-            })?;
-        let max_metadata_bytes = self.max_metadata_size_kb.checked_mul(1024).ok_or_else(|| {
-            UdsError::Config("upload.max_metadata_size_kb is too large".to_string())
-        })?;
+            .ok_or_else(|| UdsError::Config("upload.max_total_artifact_size_mb is too large".to_string()))?;
+        let max_metadata_bytes = self
+            .max_metadata_size_kb
+            .checked_mul(1024)
+            .ok_or_else(|| UdsError::Config("upload.max_metadata_size_kb is too large".to_string()))?;
         Ok(crate::models::UploadPolicy {
             max_artifact_bytes,
             max_total_artifact_bytes,
@@ -457,8 +370,7 @@ impl ServerConfig {
     pub async fn load(args: &ServerArgs) -> Result<Self> {
         let path = args.config.as_ref().ok_or_else(|| {
             UdsError::Config(
-                "server configuration is required; pass --config <path> or run 'uds server configure'"
-                    .to_string(),
+                "server configuration is required; pass --config <path> or run 'uds server configure'".to_string(),
             )
         })?;
         let text = tokio::fs::read_to_string(path).await?;
@@ -523,8 +435,7 @@ impl ServerConfig {
 
         if !valid_sha512_verifier(&self.owner_token_verifier) {
             return Err(UdsError::Config(
-                "owner_token_verifier must use the format sha512:<128 lowercase hex characters>"
-                    .to_string(),
+                "owner_token_verifier must use the format sha512:<128 lowercase hex characters>".to_string(),
             ));
         }
 
@@ -534,9 +445,7 @@ impl ServerConfig {
             ));
         }
 
-        if self.mode == ServerMode::Fleet
-            && self.cluster_token.as_deref().unwrap_or_default().len() < 16
-        {
+        if self.mode == ServerMode::Fleet && self.cluster_token.as_deref().unwrap_or_default().len() < 16 {
             return Err(UdsError::Config(
                 "cluster_token must contain at least 16 characters in fleet mode".to_string(),
             ));
@@ -585,8 +494,7 @@ impl ServerConfig {
         }
         if self.upload.max_artifact_size_mb > self.upload.max_total_artifact_size_mb {
             return Err(UdsError::Config(
-                "upload.max_artifact_size_mb must not exceed upload.max_total_artifact_size_mb"
-                    .to_string(),
+                "upload.max_artifact_size_mb must not exceed upload.max_total_artifact_size_mb".to_string(),
             ));
         }
         self.upload.policy()?;
@@ -646,15 +554,17 @@ fn validate_tls(tls: &TlsConfig, name: &str) -> Result<()> {
 }
 
 fn validate_fleet_base_url(value: &str) -> Result<()> {
-    let url = url::Url::parse(value)
-        .map_err(|e| UdsError::Config(format!("fleet_api.fleet_base_url is invalid: {e}")))?;
+    let url =
+        url::Url::parse(value).map_err(|e| UdsError::Config(format!("fleet_api.fleet_base_url is invalid: {e}")))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || url.query().is_some()
         || url.fragment().is_some()
         || url.path() != "/"
     {
-        return Err(UdsError::Config("fleet_api.fleet_base_url must be an absolute HTTP(S) URL without query, fragment, or path".into()));
+        return Err(UdsError::Config(
+            "fleet_api.fleet_base_url must be an absolute HTTP(S) URL without query, fragment, or path".into(),
+        ));
     }
     if url
         .host_str()
@@ -764,6 +674,7 @@ fn default_shutdown_grace_period_seconds() -> u64 {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use clap::Parser;
 
     #[test]
     fn server_command_accepts_server_options() {
@@ -786,8 +697,7 @@ mod tests {
 
     #[test]
     fn server_configure_has_its_own_config_option() {
-        let cli = Cli::try_parse_from(["uds", "server", "configure", "--config", "/tmp/uds.toml"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["uds", "server", "configure", "--config", "/tmp/uds.toml"]).unwrap();
 
         let Some(CliCommand::Server(args)) = cli.command else {
             panic!("expected server command");
@@ -880,8 +790,7 @@ mod tests {
             ("audit-security", ClientIpLoggingMode::AuditSecurity),
             ("always", ClientIpLoggingMode::Always),
         ] {
-            let parsed: ClientIpLoggingMode =
-                serde_json::from_str(&format!("\"{value}\"")).unwrap();
+            let parsed: ClientIpLoggingMode = serde_json::from_str(&format!("\"{value}\"")).unwrap();
             assert_eq!(parsed, expected);
         }
         assert!(serde_json::from_str::<ClientIpLoggingMode>("\"sometimes\"").is_err());

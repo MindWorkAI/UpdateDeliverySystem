@@ -37,3 +37,33 @@ Document every user-facing change directly in `CHANGELOG.md` under the current v
 The entire release changelog is sorted by these categories in the order shown above. The language used for the changelog is US English.
 
 Each new release gets a new `# UDS v<SemVer>` heading (newest first), and both the package version and UDS build number in `Cargo.toml` must be incremented together.
+
+# Source code readability
+UDS source code is maintained for people first, including developers who are new to Rust. Keep the following rules when adding or changing code:
+
+- Write comments and Rust documentation in US English.
+- Separate functions and distinct logical steps with blank lines. Do not pack unrelated operations together merely to reduce the line count.
+- Add a short `//` comment before a complex or non-obvious operation. Explain the intent, relevant fallback, or UDS-specific reason instead of translating the Rust syntax word for word.
+- Introduce a longer logical section with this exact visual pattern:
+
+  ```rust
+  //
+  // Describe the purpose of the following block.
+  //
+  ```
+
+- Give every struct and enum, including private request and state types, a `///` comment that explains what it represents and why UDS needs it.
+- Document fields and enum variants when their meaning, unit, source, security impact, or lifecycle is not immediately clear.
+- Document every public function. Add intent comments to private functions whose behavior, side effects, error handling, or concurrency is not obvious.
+- Start every non-trivial module with a `//!` comment describing its responsibility and its place in UDS.
+- Prefer named intermediate values over deeply nested expressions when the names make the data flow easier to follow.
+- Keep each module focused on one responsibility. Treat roughly 500 lines of production code as a prompt to look for a useful responsibility boundary, not as a mechanical limit.
+- Keep `src/main.rs` limited to the Tokio entry point and application startup. Put command dispatch, server lifecycle, and shutdown behavior in dedicated modules.
+
+# Rust formatting
+Run `cargo fmt` for the normal Rust layout, using the repository's `rustfmt.toml`. Human-readable layout takes precedence where rustfmt cannot express the intent:
+
+- Keep each Axum route registration on one line, even when it exceeds the normal width. This makes route tables scannable.
+- Use `#[rustfmt::skip]` only on the smallest item that requires a deliberate manual layout. Never skip an entire file or module.
+- Do not use a formatter exception to hide generally dense code. First try blank lines, named intermediate values, or a smaller helper function.
+- After editing a skipped item, preserve its manual layout and verify it during review.

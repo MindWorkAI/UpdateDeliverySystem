@@ -1,3 +1,8 @@
+//! Structured UDS logging, persistence, streaming, and terminal rendering.
+//!
+//! A shared event model keeps console output, NDJSON log files, administrative
+//! log APIs, and audit records consistent.
+
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal};
@@ -44,6 +49,7 @@ const EVENT_TIMESTAMP: &[time::format_description::FormatItem<'_>] =
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Semantic category used to distinguish operational and audit log events.
 pub enum LogEventKind {
     System,
     Http,
@@ -53,6 +59,7 @@ pub enum LogEventKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Describes which network layer supplied the recorded client IP address.
 pub enum ClientIpSource {
     Socket,
     Disabled,
@@ -60,6 +67,7 @@ pub enum ClientIpSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Stable structured representation of one UDS log event.
 pub struct LogEventLine {
     pub schema_version: u8,
     pub event_id: Uuid,
@@ -75,6 +83,7 @@ pub struct LogEventLine {
 }
 
 #[derive(Debug, Clone)]
+/// Request correlation and network metadata attached by HTTP middleware.
 pub struct RequestMetadata {
     pub request_id: String,
     pub socket_ip: Option<IpAddr>,
@@ -83,6 +92,7 @@ pub struct RequestMetadata {
     pub actor: std::sync::Arc<std::sync::Mutex<Option<crate::auth::ActorIdentity>>>,
 }
 
+/// Logging services shared by request handlers and lifecycle code.
 pub struct LoggingRuntime {
     active_file_path: Option<PathBuf>,
     sender: broadcast::Sender<LogEventLine>,
@@ -143,7 +153,10 @@ pub fn init_server_logging(config: &ServerConfig) -> Result<LoggingRuntime> {
 }
 
 pub fn init_client_logging() -> Result<()> {
-    let filter = EnvFilter::try_new(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+    // Use a conservative default for client commands unless the operator
+    // explicitly requests another filter through the environment.
+    let configured_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into());
+    let filter = EnvFilter::try_new(configured_filter)
         .map_err(|e| UdsError::Config(format!("invalid client log filter: {e}")))?;
     Registry::default()
         .with(filter)
@@ -284,8 +297,7 @@ fn build_file_log_writer(
 
 pub fn build_env_filter(level: &str, configured: &str) -> Result<EnvFilter> {
     if let Ok(filter) = std::env::var("RUST_LOG") {
-        return EnvFilter::try_new(filter)
-            .map_err(|e| UdsError::Config(format!("invalid RUST_LOG filter: {e}")));
+        return EnvFilter::try_new(filter).map_err(|e| UdsError::Config(format!("invalid RUST_LOG filter: {e}")));
     }
     let mut value = level.trim().to_string();
     for target in NOISY_TARGETS {
@@ -299,6 +311,7 @@ pub fn build_env_filter(level: &str, configured: &str) -> Result<EnvFilter> {
 }
 
 #[derive(Default)]
+/// Tracing visitor that converts typed event fields into JSON values.
 struct EventVisitor {
     message: String,
     event_json: Option<String>,
@@ -333,27 +346,21 @@ impl EventVisitor {
     }
 }
 
+/// Field formatter shared by the human and NDJSON tracing layers.
 struct UdsFieldFormatter;
 impl<'w> FormatFields<'w> for UdsFieldFormatter {
-    fn format_fields<R: tracing_subscriber::field::RecordFields>(
-        &self,
-        mut w: Writer<'w>,
-        fields: R,
-    ) -> fmt::Result {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(&self, mut w: Writer<'w>, fields: R) -> fmt::Result {
         let mut v = EventVisitor::default();
         fields.record(&mut v);
         write!(w, "{}", sanitize(&v.message))
     }
-    fn add_fields(
-        &self,
-        current: &'w mut FormattedFields<Self>,
-        fields: &tracing::span::Record<'_>,
-    ) -> fmt::Result {
+    fn add_fields(&self, current: &'w mut FormattedFields<Self>, fields: &tracing::span::Record<'_>) -> fmt::Result {
         self.format_fields(current.as_writer(), fields)
     }
 }
 
 #[derive(Clone)]
+/// Tracing formatter that persists one JSON object per line.
 struct NdjsonFormatter {
     sender: broadcast::Sender<LogEventLine>,
 }
@@ -362,12 +369,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'w> FormatFields<'w> + 'static,
 {
-    fn format_event(
-        &self,
-        _: &FmtContext<'_, S, N>,
-        mut w: Writer<'_>,
-        event: &Event<'_>,
-    ) -> fmt::Result {
+    fn format_event(&self, _: &FmtContext<'_, S, N>, mut w: Writer<'_>, event: &Event<'_>) -> fmt::Result {
         let mut v = EventVisitor::default();
         event.record(&mut v);
         let parsed = v
@@ -395,6 +397,7 @@ where
 }
 
 #[derive(Clone, Copy)]
+/// Tracing formatter optimized for readable interactive terminal output.
 struct HumanFormatter {
     color: bool,
 }
@@ -403,12 +406,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'w> FormatFields<'w> + 'static,
 {
-    fn format_event(
-        &self,
-        _: &FmtContext<'_, S, N>,
-        mut w: Writer<'_>,
-        event: &Event<'_>,
-    ) -> fmt::Result {
+    fn format_event(&self, _: &FmtContext<'_, S, N>, mut w: Writer<'_>, event: &Event<'_>) -> fmt::Result {
         let mut v = EventVisitor::default();
         event.record(&mut v);
         let parsed = v
@@ -622,11 +620,7 @@ pub fn render_log_event(event: &LogEventLine, color: bool) -> String {
         extra,
         sanitize(&event.message)
     );
-    if color {
-        colorize(&line, event.level)
-    } else {
-        line
-    }
+    if color { colorize(&line, event.level) } else { line }
 }
 pub fn color_enabled(no_color: bool) -> bool {
     !no_color && io::stdout().is_terminal()

@@ -1,3 +1,8 @@
+//! Interactive terminal prompts that guide UDS administration tasks.
+//!
+//! User-input handling stays separate from HTTP and import code, so prompts do
+//! not obscure the underlying server operations.
+
 use std::path::PathBuf;
 
 use inquire::{Confirm, Password, Select, Text};
@@ -322,12 +327,7 @@ async fn stats() -> Result<()> {
     Ok(())
 }
 
-async fn logs(
-    follow: bool,
-    lines: usize,
-    level: Option<crate::config::LogLevel>,
-    no_color: bool,
-) -> Result<()> {
+async fn logs(follow: bool, lines: usize, level: Option<crate::config::LogLevel>, no_color: bool) -> Result<()> {
     let (_config, _profile_name, profile) = load_profile_or_configure().await?;
     let client = AdminClient::new(&profile)?;
     let color = color_enabled(no_color);
@@ -442,11 +442,7 @@ fn format_release_choice(release: &ReleaseListEntry) -> String {
 }
 
 fn non_empty(value: String) -> Option<String> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.trim().is_empty() { None } else { Some(value) }
 }
 
 fn prompt_error(error: inquire::InquireError) -> UdsError {
@@ -454,6 +450,7 @@ fn prompt_error(error: inquire::InquireError) -> UdsError {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Top-level operation selected from the interactive client menu.
 enum MenuAction {
     Configure,
     Upload,
@@ -479,6 +476,7 @@ impl std::fmt::Display for MenuAction {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Source from which the client prepares a release upload.
 enum UploadSource {
     GitHubOrUrl,
     LocalFiles,

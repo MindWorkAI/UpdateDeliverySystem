@@ -22,6 +22,10 @@ const SYSTEM_BINARY: &str = "/usr/local/bin/uds";
 const UNIT_PATH: &str = "/etc/systemd/system/uds.service";
 
 pub async fn run(args: ConfigureServerArgs) -> Result<()> {
+    //
+    // Load an existing single-node configuration or start from secure
+    // production defaults.
+    //
     let mut path = args.config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
     let original = load_existing(&path)?;
     let mut config = original
@@ -47,6 +51,10 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
         new_owner_token = Some(token);
     }
 
+    //
+    // Collect the settings required by every single-node installation before
+    // offering optional advanced tuning.
+    //
     println!("UDS single-node configuration\n");
     config.public_api.bind = prompt_parse("Public API bind address:", config.public_api.bind)?;
     config.admin_api.bind = prompt_parse("Admin API bind address:", config.admin_api.bind)?;
@@ -105,6 +113,10 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     }
     config.cluster.node_id_path = config.data_dir.join("node-id");
 
+    //
+    // Validate and review the complete configuration before changing any file.
+    // Secrets are redacted from the terminal preview.
+    //
     validate_preflight(&config, &path)?;
     println!("\nConfiguration review (secrets redacted)\n");
     println!("{}", redacted_toml(&config)?);
@@ -123,6 +135,10 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
         println!("\nOWNER TOKEN — shown once; store it in a password manager now:\n{token}\n");
     }
 
+    //
+    // Offer service installation only on hosts where systemd is available.
+    // The wizard never elevates its own privileges.
+    //
     if systemd_available()
         && Confirm::new("Install or update the UDS systemd service now?")
             .with_default(false)
@@ -216,8 +232,7 @@ fn prompt_advanced(config: &mut ServerConfig) -> Result<()> {
         "Maximum platforms per release:",
         config.upload.max_platforms,
     )?;
-    config.stats.queue_capacity =
-        prompt_parse("Statistics queue capacity:", config.stats.queue_capacity)?;
+    config.stats.queue_capacity = prompt_parse("Statistics queue capacity:", config.stats.queue_capacity)?;
     config.stats.max_pending_events = prompt_parse(
         "Maximum pending statistics events:",
         config.stats.max_pending_events,
@@ -404,6 +419,7 @@ fn check_directory_target(path: &Path, label: &str) -> Result<()> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+/// Result of atomically saving a configuration and its optional backup.
 pub struct SaveOutcome {
     pub path: PathBuf,
     pub backup: Option<PathBuf>,
@@ -479,8 +495,7 @@ pub fn redacted_toml(config: &ServerConfig) -> Result<String> {
     if copy.cluster_token.is_some() {
         copy.cluster_token = Some("<redacted>".into());
     }
-    toml::to_string_pretty(&copy)
-        .map_err(|error| config_error(format!("could not render review: {error}")))
+    toml::to_string_pretty(&copy).map_err(|error| config_error(format!("could not render review: {error}")))
 }
 
 pub fn render_systemd_unit(config: &ServerConfig, binary: &Path, config_path: &Path) -> String {
@@ -650,9 +665,8 @@ fn ensure_service_account() -> Result<()> {
 
 fn choose_binary() -> Result<PathBuf> {
     let current = std::env::current_exe()?;
-    let risky = current.starts_with("/tmp")
-        || current.starts_with("/home")
-        || current.to_string_lossy().contains("/target/");
+    let risky =
+        current.starts_with("/tmp") || current.starts_with("/home") || current.to_string_lossy().contains("/target/");
     if risky {
         println!(
             "Warning: the current binary is in a build, temporary, or home path: {}",
@@ -696,8 +710,7 @@ fn verify_service(config: &ServerConfig) -> Result<()> {
         show_diagnostics();
         return Err(config_error("uds.service did not become active"));
     }
-    let mut health =
-        Url::parse(&config.public_base_url).map_err(|e| config_error(e.to_string()))?;
+    let mut health = Url::parse(&config.public_base_url).map_err(|e| config_error(e.to_string()))?;
     health.set_path("/health");
     health.set_query(None);
     health.set_fragment(None);
@@ -721,11 +734,7 @@ fn show_diagnostics() {
         ["status", "--no-pager", "uds.service"].as_slice(),
         ["--no-pager", "-u", "uds.service", "-n", "40"].as_slice(),
     ] {
-        let program = if args[0] == "status" {
-            "systemctl"
-        } else {
-            "journalctl"
-        };
+        let program = if args[0] == "status" { "systemctl" } else { "journalctl" };
         if let Ok(output) = Command::new(program).args(args).output() {
             eprintln!("{}", String::from_utf8_lossy(&output.stdout));
         }
@@ -841,6 +850,7 @@ fn print_next_steps(config: &ServerConfig) {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// TLS choices currently supported by the interactive configuration wizard.
 enum WizardTlsMode {
     Off,
     Files,
@@ -866,6 +876,7 @@ impl From<WizardTlsMode> for TlsMode {
     }
 }
 #[derive(Clone, Copy, Debug)]
+/// Source from which the systemd installer obtains the UDS executable.
 enum BinaryChoice {
     Copy,
     Current,
@@ -980,8 +991,7 @@ WantedBy=multi-user.target
         assert_eq!(normal, expected_normal);
 
         config.public_api.bind = "0.0.0.0:443".parse().unwrap();
-        let privileged =
-            render_systemd_unit(&config, Path::new(SYSTEM_BINARY), Path::new(SYSTEM_CONFIG));
+        let privileged = render_systemd_unit(&config, Path::new(SYSTEM_BINARY), Path::new(SYSTEM_CONFIG));
         let expected_privileged = expected_normal.replace(
             "CapabilityBoundingSet=\n",
             "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",

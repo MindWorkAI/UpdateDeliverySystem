@@ -15,7 +15,7 @@ pub fn clap_version() -> String {
 
 pub fn banner() -> String {
     format!(
-        " _   _ ____  ____  \n| | | |  _ \\|  _ \\ \n| |_| | | | | |_) |\n \\___/|_| |_|____/ \n\nMindWork AI Studio · Update Delivery System\nv{VERSION} · build {BUILD}\n"
+        " _   _ ____  ____  \n| | | |  _ \\/ ___|\n| | | | | | \\___ \\\n| |_| | |_| |___) |\n \\___/|____/|____/ \n\nMindWork AI Studio · Update Delivery System\nv{VERSION} · build {BUILD}\n\n"
     )
 }
 
@@ -41,6 +41,10 @@ mod tests {
         assert_eq!(display_version(), "UDS v26.7.1 (build 1)");
         assert_eq!(clap_version(), "26.7.1 (build 1)");
         let output = banner();
+        assert_eq!(
+            output,
+            " _   _ ____  ____  \n| | | |  _ \\/ ___|\n| | | | | | \\___ \\\n| |_| | |_| |___) |\n \\___/|____/|____/ \n\nMindWork AI Studio · Update Delivery System\nv26.7.1 · build 1\n"
+        );
         assert!(output.contains("MindWork AI Studio · Update Delivery System"));
         assert!(output.contains("v26.7.1 · build 1"));
     }

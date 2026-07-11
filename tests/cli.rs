@@ -11,6 +11,7 @@ fn bare_uds_prints_help_and_exits_successfully() {
     assert!(stdout.contains("client"));
     assert!(stdout.contains("version"));
     assert!(stdout.contains("changelog"));
+    assert!(!stdout.contains("MindWork AI Studio Update Delivery System"));
 }
 
 #[test]

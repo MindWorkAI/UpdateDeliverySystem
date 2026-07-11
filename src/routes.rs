@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::cluster::ClusterState;
 use crate::config::LogLevel;
-use crate::config::{ServerConfig, ServerMode};
+use crate::config::ServerConfig;
 use crate::errors::{ErrorResponseMetadata, Result, UdsError};
 use crate::logging::{
     LogEventKind, LoggingRuntime, RequestMetadata, events_to_ndjson, read_recent_events,
@@ -44,7 +44,23 @@ pub struct AppState {
     pub shutdown: Arc<ShutdownState>,
 }
 
-pub fn build_router(state: AppState) -> Router {
+pub fn build_public_router(state: AppState) -> Router {
+    apply_common_layers(
+        Router::new()
+            .route("/health", get(health))
+            .route(
+                "/api/v1/updates/{channel}/{target}/{arch}/{current_version}",
+                get(check_update),
+            )
+            .route(
+                "/api/v1/downloads/{channel}/{version}/{platform}/{file_name}",
+                get(download_artifact),
+            ),
+        state,
+    )
+}
+
+pub fn build_admin_router(state: AppState) -> Router {
     let upload_policy = state
         .config
         .upload
@@ -57,14 +73,6 @@ pub fn build_router(state: AppState) -> Router {
         .min(usize::MAX as u64) as usize;
     let mut router = Router::new()
         .route("/health", get(health))
-        .route(
-            "/api/v1/updates/{channel}/{target}/{arch}/{current_version}",
-            get(check_update),
-        )
-        .route(
-            "/api/v1/downloads/{channel}/{version}/{platform}/{file_name}",
-            get(download_artifact),
-        )
         .route(
             "/admin/v1/channels/{channel}/releases",
             get(list_releases)
@@ -92,13 +100,21 @@ pub fn build_router(state: AppState) -> Router {
             .route("/admin/v1/logs/stream", get(stream_logs));
     }
 
-    if state.config.mode == ServerMode::Fleet {
-        router = router
-            .route("/internal/v1/replication/events", post(replication_event))
-            .route("/internal/v1/catalog", get(catalog))
-            .route("/internal/v1/stats/local/{channel}", get(local_stats));
-    }
+    apply_common_layers(router, state)
+}
 
+pub fn build_fleet_router(state: AppState) -> Router {
+    apply_common_layers(
+        Router::new()
+            .route("/health", get(health))
+            .route("/fleet/v1/replication/events", post(replication_event))
+            .route("/fleet/v1/catalog", get(catalog))
+            .route("/fleet/v1/stats/local/{channel}", get(local_stats)),
+        state,
+    )
+}
+
+fn apply_common_layers(router: Router<AppState>, state: AppState) -> Router {
     router
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(|_| {
             UdsError::Storage("request handler panicked".into()).into_response()
@@ -237,11 +253,8 @@ async fn request_logging(
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "mode": state.config.mode,
-        "node_id": state.cluster.node_id(),
-    }))
+    let _ = state;
+    Json(serde_json::json!({ "status": "ok" }))
 }
 
 async fn check_update(
@@ -325,15 +338,15 @@ async fn download_artifact(
     let mut response = (StatusCode::OK, body).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/octet-stream"),
+        HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_static("attachment"),
+        HeaderValue::from_static("attachment"),
     );
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
-        header::HeaderValue::from_str(&artifact_size.to_string())
+        HeaderValue::from_str(&artifact_size.to_string())
             .map_err(|error| UdsError::Storage(format!("invalid artifact size header: {error}")))?,
     );
     Ok(response)
@@ -780,9 +793,11 @@ mod tests {
 
     async fn test_app() -> (
         Router,
+        Router,
         Arc<StatsRecorder>,
         Arc<ShutdownState>,
         tempfile::TempDir,
+        AppState,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = ServerConfig::development_default();
@@ -813,7 +828,9 @@ mod tests {
             logging: Arc::new(LoggingRuntime::disabled()),
             shutdown: shutdown.clone(),
         };
-        (build_router(state), stats, shutdown, temp)
+        let public = build_public_router(state.clone());
+        let admin = build_admin_router(state.clone());
+        (public, admin, stats, shutdown, temp, state)
     }
 
     fn multipart_body(artifact: &[u8]) -> (String, Vec<u8>) {
@@ -857,11 +874,11 @@ mod tests {
 
     #[tokio::test]
     async fn upload_streams_into_blob_storage_and_download_counts_on_eof() {
-        let (router, stats, shutdown, _temp) = test_app().await;
-        let response = upload(router.clone(), b"artifact bytes").await;
+        let (public, admin, stats, shutdown, _temp, _state) = test_app().await;
+        let response = upload(admin, b"artifact bytes").await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
+        let response = public
             .oneshot(
                 Request::get("/api/v1/downloads/stable/1.2.3/linux-x86_64/studio.tar.gz")
                     .body(Body::empty())
@@ -883,13 +900,13 @@ mod tests {
 
     #[tokio::test]
     async fn aborted_download_is_untracked_without_recording_stats() {
-        let (router, stats, shutdown, _temp) = test_app().await;
+        let (public, admin, stats, shutdown, _temp, _state) = test_app().await;
         assert_eq!(
-            upload(router.clone(), b"artifact bytes").await.status(),
+            upload(admin, b"artifact bytes").await.status(),
             StatusCode::OK
         );
 
-        let response = router
+        let response = public
             .oneshot(
                 Request::get("/api/v1/downloads/stable/1.2.3/linux-x86_64/studio.tar.gz")
                     .body(Body::empty())
@@ -905,16 +922,16 @@ mod tests {
 
     #[tokio::test]
     async fn upload_rejects_artifact_above_policy_limit() {
-        let (router, _stats, _shutdown, _temp) = test_app().await;
+        let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
         let artifact = vec![0u8; 1024 * 1024 + 1];
-        let response = upload(router, &artifact).await;
+        let response = upload(admin, &artifact).await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
     async fn upload_policy_requires_admin_authentication() {
-        let (router, _stats, _shutdown, _temp) = test_app().await;
-        let response = router
+        let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
+        let response = admin
             .oneshot(
                 Request::get("/admin/v1/upload-policy")
                     .body(Body::empty())
@@ -927,8 +944,8 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_service_unavailable_while_draining() {
-        let (router, _stats, shutdown, _temp) = test_app().await;
-        let healthy = router
+        let (public, _admin, _stats, shutdown, _temp, _state) = test_app().await;
+        let healthy = public
             .clone()
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -936,7 +953,7 @@ mod tests {
         assert_eq!(healthy.status(), StatusCode::OK);
 
         assert!(shutdown.begin_draining());
-        let draining = router
+        let draining = public
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -946,5 +963,24 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
             serde_json::json!({"status": "draining"})
         );
+    }
+
+    #[tokio::test]
+    async fn listeners_expose_only_their_own_routes_and_no_internal_aliases() {
+        let (_public, _admin, _stats, _shutdown, _temp, state) = test_app().await;
+        let public = build_public_router(state.clone());
+        let admin = build_admin_router(state.clone());
+        let fleet = build_fleet_router(state);
+        for (router, foreign) in [
+            (public, "/admin/v1/upload-policy"),
+            (admin, "/api/v1/updates/stable/linux/x86/1.0.0"),
+            (fleet, "/internal/v1/catalog"),
+        ] {
+            let response = router
+                .oneshot(Request::get(foreign).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

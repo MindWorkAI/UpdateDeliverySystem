@@ -129,8 +129,10 @@ pub struct ServerConfig {
     #[serde(default = "default_mode")]
     pub mode: ServerMode,
 
-    #[serde(default = "default_bind")]
-    pub bind: SocketAddr,
+    pub public_api: ListenerConfig,
+    pub admin_api: ListenerConfig,
+    #[serde(default)]
+    pub fleet_api: Option<FleetApiConfig>,
 
     pub public_base_url: String,
     pub data_dir: PathBuf,
@@ -141,9 +143,6 @@ pub struct ServerConfig {
 
     #[serde(default = "default_channels")]
     pub channels: BTreeSet<String>,
-
-    #[serde(default)]
-    pub tls: TlsConfig,
 
     #[serde(default)]
     pub cluster: ClusterConfig,
@@ -159,6 +158,21 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub shutdown: ShutdownConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenerConfig {
+    pub bind: SocketAddr,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetApiConfig {
+    pub bind: SocketAddr,
+    pub fleet_base_url: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,13 +455,20 @@ impl ServerConfig {
     pub fn development_default() -> Self {
         Self {
             mode: ServerMode::SingleNode,
-            bind: default_bind(),
+            public_api: ListenerConfig {
+                bind: default_public_bind(),
+                tls: TlsConfig::default(),
+            },
+            admin_api: ListenerConfig {
+                bind: default_admin_bind(),
+                tls: TlsConfig::default(),
+            },
+            fleet_api: None,
             public_base_url: "http://127.0.0.1:8080".to_string(),
             data_dir: PathBuf::from("./uds-data"),
             admin_token: "change-me-admin-token".to_string(),
             cluster_token: None,
             channels: default_channels(),
-            tls: TlsConfig::default(),
             cluster: ClusterConfig::default(),
             logging: LoggingConfig::default(),
             upload: UploadConfig::default(),
@@ -459,7 +480,6 @@ impl ServerConfig {
     /// Safe starting point for an interactively configured production server.
     pub fn production_single_node_default() -> Self {
         let mut config = Self::development_default();
-        config.bind = default_bind();
         config.public_base_url = "https://updates.example.org".to_string();
         config.data_dir = PathBuf::from("/var/lib/uds");
         config.admin_token = String::new();
@@ -494,25 +514,25 @@ impl ServerConfig {
             ));
         }
 
-        match self.tls.mode {
-            TlsMode::Off => {}
-            TlsMode::Files => {
-                require_existing_file(self.tls.cert_path.as_deref(), "tls.cert_path")?;
-                require_existing_file(self.tls.key_path.as_deref(), "tls.key_path")?;
+        match (self.mode, &self.fleet_api) {
+            (ServerMode::Fleet, None) => {
+                return Err(UdsError::Config(
+                    "fleet_api is required in fleet mode".into(),
+                ));
             }
-            TlsMode::Acme => {
-                if self.tls.acme_domains.is_empty() {
-                    return Err(UdsError::Config(
-                        "tls.acme_domains must contain at least one domain in ACME mode"
-                            .to_string(),
-                    ));
-                }
-                if self.tls.acme_contact_email.is_none() {
-                    return Err(UdsError::Config(
-                        "tls.acme_contact_email is required in ACME mode".to_string(),
-                    ));
-                }
+            (ServerMode::SingleNode, Some(_)) => {
+                return Err(UdsError::Config(
+                    "fleet_api is not allowed in single-node mode".into(),
+                ));
             }
+            _ => {}
+        }
+
+        validate_tls(&self.public_api.tls, "public_api.tls")?;
+        validate_tls(&self.admin_api.tls, "admin_api.tls")?;
+        if let Some(fleet) = &self.fleet_api {
+            validate_tls(&fleet.tls, "fleet_api.tls")?;
+            validate_fleet_base_url(&fleet.fleet_base_url)?;
         }
 
         if self.logging.level.trim().is_empty() {
@@ -570,6 +590,47 @@ impl ServerConfig {
     }
 }
 
+fn validate_tls(tls: &TlsConfig, name: &str) -> Result<()> {
+    match tls.mode {
+        TlsMode::Off => Ok(()),
+        TlsMode::Files => {
+            require_existing_file(tls.cert_path.as_deref(), &format!("{name}.cert_path"))?;
+            require_existing_file(tls.key_path.as_deref(), &format!("{name}.key_path"))
+        }
+        TlsMode::Acme => {
+            if tls.acme_domains.is_empty() || tls.acme_contact_email.is_none() {
+                return Err(UdsError::Config(format!(
+                    "{name} requires domains and contact email in ACME mode"
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_fleet_base_url(value: &str) -> Result<()> {
+    let url = url::Url::parse(value)
+        .map_err(|e| UdsError::Config(format!("fleet_api.fleet_base_url is invalid: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(UdsError::Config("fleet_api.fleet_base_url must be an absolute HTTP(S) URL without query, fragment, or path".into()));
+    }
+    if url
+        .host_str()
+        .and_then(|h| h.parse::<IpAddr>().ok())
+        .is_some_and(|ip| ip.is_unspecified())
+    {
+        return Err(UdsError::Config(
+            "fleet_api.fleet_base_url must not use a wildcard address".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_existing_file(path: Option<&Path>, name: &str) -> Result<()> {
     let path = path.ok_or_else(|| UdsError::Config(format!("{name} is required")))?;
     if !path.is_file() {
@@ -588,8 +649,11 @@ fn default_tls_mode() -> TlsMode {
     TlsMode::Off
 }
 
-fn default_bind() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080)
+fn default_public_bind() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+}
+fn default_admin_bind() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081)
 }
 
 fn default_channels() -> BTreeSet<String> {
@@ -739,6 +803,22 @@ mod tests {
     }
 
     #[test]
+    fn fleet_api_matches_server_mode_and_rejects_wildcard_url() {
+        let mut config = ServerConfig::development_default();
+        config.fleet_api = Some(FleetApiConfig {
+            bind: "10.20.0.12:8082".parse().unwrap(),
+            fleet_base_url: "http://10.20.0.12:8082".into(),
+            tls: TlsConfig::default(),
+        });
+        assert!(config.validate().is_err());
+        config.mode = ServerMode::Fleet;
+        config.cluster_token = Some("a-long-cluster-token".into());
+        assert!(config.validate().is_ok());
+        config.fleet_api.as_mut().unwrap().fleet_base_url = "http://0.0.0.0:8082".into();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn client_ip_logging_modes_parse_and_default() {
         assert_eq!(
             LoggingConfig::default().client_ip,
@@ -772,6 +852,11 @@ mod tests {
                 public_base_url = "https://updates.example.org"
                 data_dir = "/var/lib/uds"
                 admin_token = "a-long-admin-token"
+
+                [public_api]
+                bind = "127.0.0.1:8080"
+                [admin_api]
+                bind = "127.0.0.1:8081"
             "#,
         )
         .unwrap();

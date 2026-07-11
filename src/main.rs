@@ -12,9 +12,18 @@ use update_delivery_system::{AppState, ServerConfig, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    update_delivery_system::build_info::print_banner_if_interactive()?;
     let cli = Cli::parse();
 
     match cli.command {
+        Some(CliCommand::Version) => {
+            println!("{}", update_delivery_system::build_info::display_version());
+            Ok(())
+        }
+        Some(CliCommand::Changelog) => {
+            update_delivery_system::changelog::run()?;
+            Ok(())
+        }
         Some(CliCommand::Server(mut args)) => match args.command.take() {
             Some(ServerCommand::Configure(configure_args)) => {
                 update_delivery_system::server_configure::run(configure_args).await?;

@@ -20,3 +20,6 @@ In addition, new nodes should configure themselves: via broadcast, the UDS fleet
 
 # Software
 We use the latest Rust version with the latest Edition 2024. For the HTTPS API, we use `axum`.
+
+# Changelog and releases
+Document every user-facing change directly in `CHANGELOG.md` under the current version, using US English. Each new release gets a new `# UDS v<SemVer>` heading (newest first), and both the package version and UDS build number in `Cargo.toml` must be incremented together.

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{Result, UdsError};
 
 #[derive(Debug, Parser)]
-#[command(name = "uds", about = "MindWork AI Studio Update Delivery System")]
+#[command(name = "uds", about = "MindWork AI Studio Update Delivery System", version = crate::build_info::CLAP_VERSION)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<CliCommand>,
@@ -16,6 +16,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum CliCommand {
+    /// Show UDS version and build information.
+    Version,
+
+    /// Browse the embedded UDS changelog.
+    Changelog,
+
     /// Run the UDS update delivery server.
     Server(ServerArgs),
 

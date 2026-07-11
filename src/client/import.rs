@@ -21,41 +21,70 @@ use crate::models::{ReleaseUploadMetadata, UploadPlatformMetadata, UploadPolicy}
 #[derive(Debug, Deserialize)]
 /// Static update manifest format published by Tauri-compatible releases.
 pub struct TauriStaticRelease {
+    /// Stores the version value used by this UDS component.
     pub version: String,
+
+    /// Stores the notes value used by this UDS component.
     #[serde(default)]
     pub notes: String,
+
+    /// Stores the pub date value used by this UDS component.
     #[serde(default)]
     pub pub_date: Option<String>,
+
+    /// Stores the platforms value used by this UDS component.
     pub platforms: BTreeMap<String, TauriStaticPlatform>,
 }
 
 #[derive(Debug, Deserialize)]
 /// Platform-specific entry inside a Tauri static update manifest.
 pub struct TauriStaticPlatform {
+    /// Stores the url value used by this UDS component.
     pub url: String,
+
+    /// Stores the signature value used by this UDS component.
     pub signature: String,
 }
 
 #[derive(Debug)]
 /// Validated metadata and artifacts ready for an administrative upload.
 pub struct PreparedUpload {
+    /// Stores the metadata value used by this UDS component.
     pub metadata: ReleaseUploadMetadata,
+
+    /// Stores the artifacts value used by this UDS component.
     pub artifacts: Vec<PreparedArtifact>,
+
+    /// Stores the temp dir value used by this UDS component.
     _temp_dir: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug, Clone)]
 /// One local or downloaded artifact prepared for multipart streaming.
 pub struct PreparedArtifact {
+    /// Stores the field name value used by this UDS component.
     pub field_name: String,
+
+    /// Stores the platform value used by this UDS component.
     pub platform: String,
+
+    /// Stores the file name value used by this UDS component.
     pub file_name: String,
+
+    /// Stores the source url value used by this UDS component.
     pub source_url: String,
+
+    /// Stores the path value used by this UDS component.
     pub path: PathBuf,
+
+    /// Stores the size value used by this UDS component.
     pub size: u64,
+
+    /// Stores the sha256 value used by this UDS component.
     pub sha256: String,
 }
 
+/// Performs the prepare from remote operation required by UDS.
 pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Result<PreparedUpload> {
     let client = Client::builder()
         .user_agent("uds-client")
@@ -125,6 +154,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
     })
 }
 
+/// Performs the prepare from local operation required by UDS.
 pub async fn prepare_from_local(
     latest_json_path: &Path,
     artifact_dir: &Path,
@@ -201,6 +231,7 @@ pub async fn prepare_from_local(
     })
 }
 
+/// Performs the fetch release metadata operation required by UDS.
 async fn fetch_release_metadata(client: &Client, url: Url, limit: u64) -> Result<TauriStaticRelease> {
     let response = client
         .get(url)
@@ -236,6 +267,7 @@ async fn fetch_release_metadata(client: &Client, url: Url, limit: u64) -> Result
     })
 }
 
+/// Performs the download artifact operation required by UDS.
 async fn download_artifact(client: &Client, url: Url, path: &Path, limit: u64) -> Result<(u64, String)> {
     let response = client
         .get(url)
@@ -272,6 +304,7 @@ async fn download_artifact(client: &Client, url: Url, path: &Path, limit: u64) -
     Ok((size, hex::encode(hasher.finalize())))
 }
 
+/// Performs the hash local artifact operation required by UDS.
 async fn hash_local_artifact(path: &Path, limit: u64) -> Result<(u64, String)> {
     let size = fs::metadata(path).await?.len();
     if size > limit {
@@ -293,6 +326,7 @@ async fn hash_local_artifact(path: &Path, limit: u64) -> Result<(u64, String)> {
     Ok((size, hex::encode(hasher.finalize())))
 }
 
+/// Performs the validate platform count operation required by UDS.
 fn validate_platform_count(release: &TauriStaticRelease, policy: &UploadPolicy) -> Result<()> {
     if release.platforms.is_empty() || release.platforms.len() > policy.max_platforms {
         return Err(UdsError::BadRequest(format!(
@@ -303,6 +337,7 @@ fn validate_platform_count(release: &TauriStaticRelease, policy: &UploadPolicy) 
     Ok(())
 }
 
+/// Performs the validate serialized metadata operation required by UDS.
 fn validate_serialized_metadata(metadata: &ReleaseUploadMetadata, policy: &UploadPolicy) -> Result<()> {
     if serde_json::to_vec(metadata)?.len() as u64 > policy.max_metadata_bytes {
         return Err(UdsError::PayloadTooLarge(
@@ -312,6 +347,7 @@ fn validate_serialized_metadata(metadata: &ReleaseUploadMetadata, policy: &Uploa
     Ok(())
 }
 
+/// Performs the normalize github release url operation required by UDS.
 pub fn normalize_github_release_url(input: &str) -> Result<Url> {
     let url = Url::parse(input).map_err(|error| UdsError::BadRequest(format!("invalid URL: {error}")))?;
     if url.path().ends_with("/latest.json") {
@@ -341,6 +377,7 @@ pub fn normalize_github_release_url(input: &str) -> Result<Url> {
     Ok(url)
 }
 
+/// Performs the artifact file name operation required by UDS.
 fn artifact_file_name(url: &Url) -> Result<String> {
     url.path_segments()
         .and_then(|mut segments| segments.next_back())
@@ -353,6 +390,7 @@ fn artifact_file_name(url: &Url) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Verifies that normalizes github latest release url.
     #[test]
     fn normalizes_github_latest_release_url() {
         let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/latest").unwrap();
@@ -362,6 +400,7 @@ mod tests {
         );
     }
 
+    /// Verifies that normalizes github tag url.
     #[test]
     fn normalizes_github_tag_url() {
         let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/tag/v26.7.2").unwrap();

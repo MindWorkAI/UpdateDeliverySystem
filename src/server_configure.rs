@@ -458,7 +458,37 @@ pub fn render_systemd_unit(config: &ServerConfig, binary: &Path, config_path: &P
         "CapabilityBoundingSet=\n"
     };
     format!(
-        "[Unit]\nDescription=MindWork AI Studio Update Delivery System\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=uds\nGroup=uds\nExecStart={} server --config {}\nRestart=on-failure\nRestartSec=5s\nTimeoutStopSec={}s\nNoNewPrivileges=true\nPrivateTmp=true\nPrivateDevices=true\nProtectSystem=strict\nProtectHome=read-only\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nRestrictRealtime=true\n{}ReadWritePaths={} {}\n\n[Install]\nWantedBy=multi-user.target\n",
+        r#"
+[Unit]
+Description=MindWork AI Studio Update Delivery System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uds
+Group=uds
+ExecStart={} server --config {}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec={}s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+{}ReadWritePaths={} {}
+
+[Install]
+WantedBy=multi-user.target
+"#,
         binary.display(),
         config_path.display(),
         config.shutdown.grace_period_seconds.saturating_add(30),
@@ -868,19 +898,53 @@ mod tests {
 
     #[test]
     fn unit_is_hardened_and_only_grants_low_port_capability() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = valid_config(dir.path());
+        let mut config = valid_config(Path::new("/srv/uds-test"));
         let normal = render_systemd_unit(
             &config,
             Path::new("/usr/local/bin/uds"),
             Path::new(SYSTEM_CONFIG),
         );
-        assert!(normal.contains("ProtectSystem=strict"));
-        assert!(!normal.contains("AmbientCapabilities="));
+        let expected_normal = r#"[Unit]
+Description=MindWork AI Studio Update Delivery System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uds
+Group=uds
+ExecStart=/usr/local/bin/uds server --config /etc/uds/config.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=330s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+ReadWritePaths=/srv/uds-test/data /srv/uds-test/data/logs
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        assert_eq!(normal, expected_normal);
+
         config.bind = "0.0.0.0:443".parse().unwrap();
         let privileged =
             render_systemd_unit(&config, Path::new(SYSTEM_BINARY), Path::new(SYSTEM_CONFIG));
-        assert!(privileged.contains("AmbientCapabilities=CAP_NET_BIND_SERVICE"));
+        let expected_privileged = expected_normal.replace(
+            "CapabilityBoundingSet=\n",
+            "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
+        );
+        assert_eq!(privileged, expected_privileged);
     }
 
     #[test]

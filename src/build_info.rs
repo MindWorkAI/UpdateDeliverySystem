@@ -14,8 +14,17 @@ pub fn clap_version() -> String {
 }
 
 pub fn banner() -> String {
-    format!(
-        " _   _ ____  ____  \n| | | |  _ \\/ ___|\n| | | | | | \\___ \\\n| |_| | |_| |___) |\n \\___/|____/|____/ \n\nMindWork AI Studio · Update Delivery System\nv{VERSION} · build {BUILD}\n\n"
+    format!(r#"
+    _   _ ____  ____
+   | | | |  _ \/ ___|
+   | | | | | | \___ \
+   | |_| | |_| |___) |
+    \___/|____/|____/
+
+   MindWork AI Studio · Update Delivery System
+   v{VERSION} · build {BUILD}
+
+"#
     )
 }
 
@@ -43,7 +52,16 @@ mod tests {
         let output = banner();
         assert_eq!(
             output,
-            " _   _ ____  ____  \n| | | |  _ \\/ ___|\n| | | | | | \\___ \\\n| |_| | |_| |___) |\n \\___/|____/|____/ \n\nMindWork AI Studio · Update Delivery System\nv26.7.1 · build 1\n"
+            r#" _   _ ____  ____  
+| | | |  _ \/ ___|
+| | | | | | \___ \
+| |_| | |_| |___) |
+ \___/|____/|____/ 
+
+MindWork AI Studio · Update Delivery System
+v26.7.1 · build 1
+
+"#
         );
         assert!(output.contains("MindWork AI Studio · Update Delivery System"));
         assert!(output.contains("v26.7.1 · build 1"));

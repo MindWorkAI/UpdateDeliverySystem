@@ -35,6 +35,22 @@ pub struct ServerArgs {
     /// Force single-node mode and disable peer discovery and replication.
     #[arg(long)]
     pub single_node_mode: bool,
+
+    #[command(subcommand)]
+    pub command: Option<ServerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerCommand {
+    /// Interactively create or update a single-node server configuration.
+    Configure(ConfigureServerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigureServerArgs {
+    /// Path to the TOML configuration file to create or update.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -434,6 +450,17 @@ impl ServerConfig {
         }
     }
 
+    /// Safe starting point for an interactively configured production server.
+    pub fn production_single_node_default() -> Self {
+        let mut config = Self::development_default();
+        config.bind = default_bind();
+        config.public_base_url = "https://updates.example.org".to_string();
+        config.data_dir = PathBuf::from("/var/lib/uds");
+        config.admin_token = String::new();
+        config.cluster.node_id_path = config.data_dir.join("node-id");
+        config
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.public_base_url.trim().is_empty() {
             return Err(UdsError::Config(
@@ -647,6 +674,23 @@ mod tests {
         };
         assert_eq!(args.config, Some(PathBuf::from("/etc/uds/config.toml")));
         assert!(args.single_node_mode);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn server_configure_has_its_own_config_option() {
+        let cli = Cli::try_parse_from(["uds", "server", "configure", "--config", "/tmp/uds.toml"])
+            .unwrap();
+
+        let Some(CliCommand::Server(args)) = cli.command else {
+            panic!("expected server command");
+        };
+        assert!(args.config.is_none());
+        assert!(matches!(
+            args.command,
+            Some(ServerCommand::Configure(ConfigureServerArgs { config }))
+                if config == Some(PathBuf::from("/tmp/uds.toml"))
+        ));
     }
 
     #[test]

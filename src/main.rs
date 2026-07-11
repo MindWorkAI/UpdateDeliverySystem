@@ -5,7 +5,7 @@ use axum_server::Handle;
 use clap::{CommandFactory, Parser};
 use update_delivery_system::cluster::{ClusterState, spawn_background_tasks};
 use update_delivery_system::config::LogLevel;
-use update_delivery_system::config::{Cli, CliCommand, ServerArgs};
+use update_delivery_system::config::{Cli, CliCommand, ServerArgs, ServerCommand};
 use update_delivery_system::logging::{LogEventKind, LoggingRuntime};
 use update_delivery_system::shutdown::{ActiveTransfer, ShutdownState};
 use update_delivery_system::{AppState, ServerConfig, build_router};
@@ -15,7 +15,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(CliCommand::Server(args)) => run_server(args).await,
+        Some(CliCommand::Server(mut args)) => match args.command.take() {
+            Some(ServerCommand::Configure(configure_args)) => {
+                update_delivery_system::server_configure::run(configure_args).await?;
+                Ok(())
+            }
+            None => run_server(args).await,
+        },
         Some(CliCommand::Client { command }) => {
             update_delivery_system::logging::init_client_logging()?;
             update_delivery_system::client::run(command).await?;

@@ -57,6 +57,7 @@ reconcile_interval_seconds = 300
 [logging]
 level = "info"
 filter = ""
+client_ip = "audit-security"
 
 [logging.console]
 enabled = true
@@ -274,13 +275,21 @@ UDS uses UTC timestamps and a log layout inspired by the MindWork AI Studio runt
 
 Console logs remain human-readable. Files use typed NDJSON with one event per line. Terminal colors are only used when `logging.console.color = "always"` or when `color = "auto"` and stdout is an interactive terminal.
 
+The `logging.client_ip` option controls whether the direct client socket IP address is included in request-related log events:
+
+- `never`: Never log client IP addresses.
+- `audit-security`: Log client IP addresses only for audit and security events. This is the default.
+- `always`: Log client IP addresses for HTTP, audit, security, and other request-related events, including errors and panics.
+
+UDS uses only the direct socket IP address. It does not evaluate `Forwarded` or `X-Forwarded-For`. When UDS runs behind a load balancer, the logged socket IP is therefore probably the load balancer's IP address. Events without an HTTP request context never include a client IP address.
+
 The default production log base path is:
 
 ```text
 <data_dir>/logs/events.ndjson
 ```
 
-UDS uses `flexi_logger` for file rotation and cleanup. The configured `logging.file.path` is the base name for the rotating file set. With the default path above, the active file is `events_rCURRENT.log`; archived files are named `events_r00000.log`, `events_r00001.log`, and so on. The active file is rotated when it exceeds `logging.file.max_size_mb`, which defaults to 100 MB, and UDS keeps up to `logging.file.max_archived_files` archives.
+UDS uses `flexi_logger` for file rotation and cleanup. The configured `logging.file.path` is the base name for the rotating file set. With the default path above, the active file is `events_rCURRENT.ndjson`; archived files are named `events_r00000.ndjson`, `events_r00001.ndjson`, and so on. The active file is rotated when it exceeds `logging.file.max_size_mb`, which defaults to 100 MB, and UDS keeps up to `logging.file.max_archived_files` archives.
 
 When UDS runs as a systemd service, systemd captures stdout and stderr automatically. Admins can inspect local service logs with:
 

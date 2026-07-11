@@ -61,6 +61,9 @@ struct RollupState {
 
 enum StatsCommand {
     Event(StatsEvent),
+    Flush {
+        response: oneshot::Sender<()>,
+    },
     ChannelStats {
         channel: String,
         response: oneshot::Sender<Result<ChannelStats>>,
@@ -113,6 +116,17 @@ impl StatsRecorder {
         receiver.await.map_err(|_| {
             UdsError::Storage("statistics recorder stopped before answering".to_string())
         })?
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(StatsCommand::Flush { response: sender })
+            .await
+            .map_err(|_| UdsError::Storage("statistics recorder is unavailable".to_string()))?;
+        receiver.await.map_err(|_| {
+            UdsError::Storage("statistics recorder stopped before flushing".to_string())
+        })
     }
 }
 
@@ -167,6 +181,9 @@ impl StatsActor {
                     let Some(command) = command else { break; };
                     match command {
                         StatsCommand::Event(event) => self.persist_event(event).await,
+                        StatsCommand::Flush { response } => {
+                            let _ = response.send(());
+                        }
                         StatsCommand::ChannelStats { channel, response } => {
                             let result = async {
                                 self.rollup_events().await?;

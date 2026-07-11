@@ -1,14 +1,20 @@
 use axum::Router;
+use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 
 use crate::config::{ServerConfig, TlsMode};
 use crate::errors::{Result, UdsError};
 
-pub async fn serve(config: ServerConfig, router: Router) -> Result<()> {
+pub async fn serve(
+    config: ServerConfig,
+    router: Router,
+    handle: Handle<std::net::SocketAddr>,
+) -> Result<()> {
     match config.tls.mode {
         TlsMode::Off => {
             tracing::info!(bind = %config.bind, "starting HTTP server without TLS");
             axum_server::bind(config.bind)
+                .handle(handle)
                 .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
@@ -19,6 +25,7 @@ pub async fn serve(config: ServerConfig, router: Router) -> Result<()> {
             let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
             tracing::info!(bind = %config.bind, "starting HTTPS server with file-based TLS");
             axum_server::bind_rustls(config.bind, tls_config)
+                .handle(handle)
                 .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;

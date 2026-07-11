@@ -30,6 +30,7 @@ use crate::models::{
     ReleaseUploadMetadata, ReplicationEvent, ReplicationEventType, UploadPolicy,
 };
 use crate::security::{AdminAuth, ClusterAuth};
+use crate::shutdown::{ShutdownState, TransferKind};
 use crate::stats::{ChannelStats, StatsEvent, StatsEventKind, StatsRecorder};
 use crate::storage::{StagedArtifact, Storage};
 
@@ -40,6 +41,7 @@ pub struct AppState {
     pub stats: Arc<StatsRecorder>,
     pub cluster: ClusterState,
     pub logging: Arc<LoggingRuntime>,
+    pub shutdown: Arc<ShutdownState>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -105,7 +107,36 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             request_logging,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_during_shutdown,
+        ))
         .with_state(state)
+}
+
+async fn reject_during_shutdown(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.shutdown.is_draining() {
+        return next.run(request).await;
+    }
+
+    let status = if request.uri().path() == "/health" {
+        "draining"
+    } else {
+        "service_unavailable"
+    };
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "status": status })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 async fn request_logging(
@@ -239,6 +270,7 @@ async fn check_update(
 
 async fn download_artifact(
     State(state): State<AppState>,
+    Extension(request): Extension<RequestMetadata>,
     Path((channel, version, platform, file_name)): Path<(String, String, String, String)>,
 ) -> Result<Response> {
     require_allowed_channel(&state, &channel)?;
@@ -248,6 +280,19 @@ async fn download_artifact(
         .await?;
     let file = File::open(path).await?;
     let mut file_stream = ReaderStream::new(file);
+    let mut transfer_fields = BTreeMap::new();
+    transfer_fields.insert("channel".into(), serde_json::Value::from(channel.clone()));
+    transfer_fields.insert("version".into(), serde_json::Value::from(version.clone()));
+    transfer_fields.insert("platform".into(), serde_json::Value::from(platform.clone()));
+    transfer_fields.insert(
+        "file_name".into(),
+        serde_json::Value::from(file_name.clone()),
+    );
+    transfer_fields.insert("size".into(), serde_json::Value::from(artifact_size));
+    let transfer =
+        state
+            .shutdown
+            .start_transfer(TransferKind::Download, request.request_id, transfer_fields);
     let (target, arch) = platform
         .split_once('-')
         .map(|(target, arch)| (Some(target.to_string()), Some(arch.to_string())))
@@ -263,6 +308,7 @@ async fn download_artifact(
         bytes: artifact_size,
     };
     let stream = async_stream::stream! {
+        let _transfer = transfer;
         while let Some(chunk) = file_stream.next().await {
             match chunk {
                 Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
@@ -302,8 +348,16 @@ async fn upload_release(
 ) -> Result<Json<MutationResponse>> {
     require_allowed_channel(&state, &channel)?;
     let policy = state.config.upload.policy()?;
+    let mut transfer_fields = BTreeMap::new();
+    transfer_fields.insert("channel".into(), serde_json::Value::from(channel.clone()));
+    let transfer = state.shutdown.start_transfer(
+        TransferKind::Upload,
+        request.request_id.clone(),
+        transfer_fields,
+    );
     let upload =
         read_release_multipart(multipart, state.storage.upload_staging_root(), &policy).await?;
+    transfer.set_field("version", upload.metadata.version.clone());
     let manifest = state
         .storage
         .put_release(&channel, upload.metadata, upload.files, &policy)
@@ -527,6 +581,7 @@ async fn stream_logs(
     let stream = stream_events(
         state.logging.clone(),
         query.lines.unwrap_or(100).min(10_000),
+        state.shutdown.clone(),
     );
     Ok((
         StatusCode::OK,
@@ -723,7 +778,12 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    async fn test_app() -> (Router, Arc<StatsRecorder>, tempfile::TempDir) {
+    async fn test_app() -> (
+        Router,
+        Arc<StatsRecorder>,
+        Arc<ShutdownState>,
+        tempfile::TempDir,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = ServerConfig::development_default();
         config.data_dir = temp.path().to_path_buf();
@@ -744,14 +804,16 @@ mod tests {
                 .unwrap(),
         );
         let cluster = ClusterState::new(&config).await.unwrap();
+        let shutdown = Arc::new(ShutdownState::default());
         let state = AppState {
             config: Arc::new(config),
             storage: Arc::new(storage),
             stats: stats.clone(),
             cluster,
             logging: Arc::new(LoggingRuntime::disabled()),
+            shutdown: shutdown.clone(),
         };
-        (build_router(state), stats, temp)
+        (build_router(state), stats, shutdown, temp)
     }
 
     fn multipart_body(artifact: &[u8]) -> (String, Vec<u8>) {
@@ -795,7 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_streams_into_blob_storage_and_download_counts_on_eof() {
-        let (router, stats, _temp) = test_app().await;
+        let (router, stats, shutdown, _temp) = test_app().await;
         let response = upload(router.clone(), b"artifact bytes").await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -809,17 +871,41 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "14");
+        assert_eq!(shutdown.active_count(), 1);
         assert_eq!(stats.channel_stats("stable").await.unwrap().downloads, 0);
         assert_eq!(
             to_bytes(response.into_body(), 1024).await.unwrap(),
             "artifact bytes"
         );
+        assert_eq!(shutdown.active_count(), 0);
         assert_eq!(stats.channel_stats("stable").await.unwrap().downloads, 1);
     }
 
     #[tokio::test]
+    async fn aborted_download_is_untracked_without_recording_stats() {
+        let (router, stats, shutdown, _temp) = test_app().await;
+        assert_eq!(
+            upload(router.clone(), b"artifact bytes").await.status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .oneshot(
+                Request::get("/api/v1/downloads/stable/1.2.3/linux-x86_64/studio.tar.gz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shutdown.active_count(), 1);
+        drop(response);
+        assert_eq!(shutdown.active_count(), 0);
+        assert_eq!(stats.channel_stats("stable").await.unwrap().downloads, 0);
+    }
+
+    #[tokio::test]
     async fn upload_rejects_artifact_above_policy_limit() {
-        let (router, _stats, _temp) = test_app().await;
+        let (router, _stats, _shutdown, _temp) = test_app().await;
         let artifact = vec![0u8; 1024 * 1024 + 1];
         let response = upload(router, &artifact).await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -827,7 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_policy_requires_admin_authentication() {
-        let (router, _stats, _temp) = test_app().await;
+        let (router, _stats, _shutdown, _temp) = test_app().await;
         let response = router
             .oneshot(
                 Request::get("/admin/v1/upload-policy")
@@ -837,5 +923,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_while_draining() {
+        let (router, _stats, shutdown, _temp) = test_app().await;
+        let healthy = router
+            .clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(healthy.status(), StatusCode::OK);
+
+        assert!(shutdown.begin_draining());
+        let draining = router
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(draining.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"status": "draining"})
+        );
     }
 }

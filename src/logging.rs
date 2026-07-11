@@ -553,8 +553,49 @@ pub fn ndjson_line(event: &LogEventLine) -> String {
 pub fn stream_events(
     runtime: std::sync::Arc<LoggingRuntime>,
     lines: usize,
+    shutdown: std::sync::Arc<crate::shutdown::ShutdownState>,
 ) -> impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, io::Error>> {
-    async_stream::stream! { let mut receiver=runtime.subscribe(); let history=if let Some(path)=runtime.active_file_path(){read_recent_events(path,lines).await.unwrap_or_default()}else{vec![]}; let mut seen:HashSet<Uuid>=history.iter().map(|e|e.event_id).collect(); for event in history { yield Ok(bytes::Bytes::from(ndjson_line(&event))); } loop { match tokio::time::timeout(std::time::Duration::from_secs(15),receiver.recv()).await { Ok(Ok(event)) if seen.insert(event.event_id)=>yield Ok(bytes::Bytes::from(ndjson_line(&event))), Ok(Err(broadcast::error::RecvError::Lagged(n)))=>{let mut f=BTreeMap::new();f.insert("skipped_events".into(),Value::from(n));let event=build_event(ClientIpLoggingMode::Never,LogLevel::Warn,LogEventKind::System,"uds::logging",None,f,"log stream receiver lagged");yield Ok(bytes::Bytes::from(ndjson_line(&event)));}, Ok(Err(broadcast::error::RecvError::Closed))=>break, Err(_)=>yield Ok(bytes::Bytes::from_static(b"\n")), _=>{} } } }
+    async_stream::stream! {
+        let mut receiver = runtime.subscribe();
+        let history = if let Some(path) = runtime.active_file_path() {
+            read_recent_events(path, lines).await.unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let mut seen: HashSet<Uuid> = history.iter().map(|e| e.event_id).collect();
+        for event in history {
+            yield Ok(bytes::Bytes::from(ndjson_line(&event)));
+        }
+        loop {
+            tokio::select! {
+                _ = shutdown.draining_notified() => break,
+                received = tokio::time::timeout(std::time::Duration::from_secs(15), receiver.recv()) => {
+                    match received {
+                        Ok(Ok(event)) if seen.insert(event.event_id) => {
+                            yield Ok(bytes::Bytes::from(ndjson_line(&event)));
+                        }
+                        Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                            let mut fields = BTreeMap::new();
+                            fields.insert("skipped_events".into(), Value::from(n));
+                            let event = build_event(
+                                ClientIpLoggingMode::Never,
+                                LogLevel::Warn,
+                                LogEventKind::System,
+                                "uds::logging",
+                                None,
+                                fields,
+                                "log stream receiver lagged",
+                            );
+                            yield Ok(bytes::Bytes::from(ndjson_line(&event)));
+                        }
+                        Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                        Err(_) => yield Ok(bytes::Bytes::from_static(b"\n")),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn should_display_level(event: LogLevel, minimum: Option<LogLevel>) -> bool {

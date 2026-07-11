@@ -21,4 +21,4 @@ pub mod tls;
 
 pub use config::{Cli, ServerConfig, ServerMode};
 pub use errors::{Result, UdsError};
-pub use routes::{AppState, build_router};
+pub use routes::{AppState, build_admin_router, build_fleet_router, build_public_router};

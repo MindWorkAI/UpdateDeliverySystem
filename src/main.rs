@@ -8,7 +8,9 @@ use update_delivery_system::config::LogLevel;
 use update_delivery_system::config::{Cli, CliCommand, ServerArgs, ServerCommand};
 use update_delivery_system::logging::{LogEventKind, LoggingRuntime};
 use update_delivery_system::shutdown::{ActiveTransfer, ShutdownState};
-use update_delivery_system::{AppState, ServerConfig, build_router};
+use update_delivery_system::{
+    AppState, ServerConfig, build_admin_router, build_fleet_router, build_public_router,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -62,9 +64,10 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     let cluster = ClusterState::new(&config).await?;
     tracing::info!(
         mode = ?config.mode,
-        bind = %config.bind,
         public_base_url = %config.public_base_url,
-        tls_mode = ?config.tls.mode,
+        public_bind = %config.public_api.bind,
+        admin_bind = %config.admin_api.bind,
+        fleet_bind = config.fleet_api.as_ref().map(|v| tracing::field::display(v.bind)),
         log_file = logging
             .active_file_path()
             .map(|path| tracing::field::display(path.display())),
@@ -85,61 +88,118 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
         shutdown: shutdown.clone(),
     };
     let stats = state.stats.clone();
-    let router = build_router(state);
-    let handle = Handle::new();
+    warn_insecure_listener("public", config.public_api.bind, &config.public_api.tls);
+    warn_insecure_listener("admin", config.admin_api.bind, &config.admin_api.tls);
+    if let Some(fleet) = &config.fleet_api {
+        warn_insecure_listener("fleet", fleet.bind, &fleet.tls);
+    }
+
+    let mut listeners = tokio::task::JoinSet::new();
+    let mut handles = Vec::new();
+    for (name, bind, tls, router) in [
+        (
+            "public",
+            config.public_api.bind,
+            config.public_api.tls.clone(),
+            build_public_router(state.clone()),
+        ),
+        (
+            "admin",
+            config.admin_api.bind,
+            config.admin_api.tls.clone(),
+            build_admin_router(state.clone()),
+        ),
+    ] {
+        let handle = Handle::new();
+        handles.push(handle.clone());
+        listeners.spawn(update_delivery_system::tls::serve(
+            name, bind, tls, router, handle,
+        ));
+    }
+    if let Some(fleet) = &config.fleet_api {
+        let handle = Handle::new();
+        handles.push(handle.clone());
+        listeners.spawn(update_delivery_system::tls::serve(
+            "fleet",
+            fleet.bind,
+            fleet.tls.clone(),
+            build_fleet_router(state),
+            handle,
+        ));
+    }
     let grace_period = Duration::from_secs(config.shutdown.grace_period_seconds);
-
-    let server = update_delivery_system::tls::serve(config, router, handle.clone());
-    tokio::pin!(server);
-
-    tokio::select! {
-        result = &mut server => result?,
-        signal = shutdown_signal() => {
-            let started = Instant::now();
-            let totals_before = shutdown.totals();
-            shutdown.begin_draining();
-            emit_shutdown_started(
-                &logging,
-                signal,
-                grace_period,
-                shutdown.active_count(),
-            );
+    let first = tokio::select! {
+        result = listeners.join_next() => Err(anyhow::anyhow!("listener ended unexpectedly: {:?}", result)),
+        signal = shutdown_signal() => Ok(signal),
+    };
+    let startup_error = first.err();
+    {
+        let signal = if startup_error.is_some() {
+            "listener-failure"
+        } else {
+            "signal"
+        };
+        let started = Instant::now();
+        let totals_before = shutdown.totals();
+        shutdown.begin_draining();
+        emit_shutdown_started(&logging, signal, grace_period, shutdown.active_count());
+        for handle in &handles {
             handle.graceful_shutdown(None);
+        }
 
-            let deadline = tokio::time::sleep(grace_period);
-            tokio::pin!(deadline);
-            let mut forced = false;
-            let result = loop {
-                tokio::select! {
-                    result = &mut server => break result,
-                    _ = &mut deadline, if !forced => {
-                        forced = true;
-                        emit_forced_transfers(&logging, shutdown.mark_active_forced(), "deadline");
-                        handle.shutdown();
-                    }
-                    second_signal = shutdown_signal(), if !forced => {
-                        forced = true;
-                        emit_forced_transfers(&logging, shutdown.mark_active_forced(), second_signal);
-                        handle.shutdown();
-                    }
+        let deadline = tokio::time::sleep(grace_period);
+        tokio::pin!(deadline);
+        let mut forced = false;
+        let result = loop {
+            tokio::select! {
+                result = listeners.join_next(), if !listeners.is_empty() => {
+                    if listeners.is_empty() { break result; }
                 }
-            };
+                _ = &mut deadline, if !forced => {
+                    forced = true;
+                    emit_forced_transfers(&logging, shutdown.mark_active_forced(), "deadline");
+                    for handle in &handles { handle.shutdown(); }
+                }
+                second_signal = shutdown_signal(), if !forced => {
+                    forced = true;
+                    emit_forced_transfers(&logging, shutdown.mark_active_forced(), second_signal);
+                    for handle in &handles { handle.shutdown(); }
+                }
+                else => break None,
+            }
+        };
 
-            shutdown.wait_for_no_transfers().await;
-            stats.flush().await?;
-            let totals_after = shutdown.totals();
-            emit_shutdown_finished(
-                &logging,
-                started.elapsed(),
-                totals_after.completed.saturating_sub(totals_before.completed),
-                totals_after.aborted.saturating_sub(totals_before.aborted),
-                forced,
-                &node_id,
-            );
-            result?;
+        shutdown.wait_for_no_transfers().await;
+        stats.flush().await?;
+        let totals_after = shutdown.totals();
+        emit_shutdown_finished(
+            &logging,
+            started.elapsed(),
+            totals_after
+                .completed
+                .saturating_sub(totals_before.completed),
+            totals_after.aborted.saturating_sub(totals_before.aborted),
+            forced,
+            &node_id,
+        );
+        if let Some(result) = result {
+            result??;
         }
     }
+    if let Some(error) = startup_error {
+        return Err(error);
+    }
     Ok(())
+}
+
+fn warn_insecure_listener(
+    name: &str,
+    bind: std::net::SocketAddr,
+    tls: &update_delivery_system::config::TlsConfig,
+) {
+    if tls.mode == update_delivery_system::config::TlsMode::Off && !bind.ip().is_loopback() {
+        tracing::warn!(listener = name, %bind, "listener is exposed beyond loopback without TLS; tokens will be transmitted unencrypted");
+    }
 }
 
 fn emit_shutdown_started(

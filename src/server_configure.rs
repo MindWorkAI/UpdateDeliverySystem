@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use inquire::{Confirm, Password, Select, Text};
 use url::Url;
 
-use crate::config::{ConfigureServerArgs, ServerConfig, ServerMode, TlsMode};
+use crate::config::{ConfigureServerArgs, ListenerConfig, ServerConfig, ServerMode, TlsMode};
 use crate::errors::{Result, UdsError};
 
 const DEFAULT_CONFIG: &str = "uds.toml";
@@ -34,7 +34,7 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
             "the selected file is a fleet configuration; v1 of this wizard only configures single-node servers",
         ));
     }
-    if config.tls.mode == TlsMode::Acme {
+    if config.public_api.tls.mode == TlsMode::Acme || config.admin_api.tls.mode == TlsMode::Acme {
         return Err(config_error(
             "the selected file uses ACME, which is not supported by this wizard or the current runtime",
         ));
@@ -45,7 +45,8 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     }
 
     println!("UDS single-node configuration\n");
-    config.bind = prompt_parse("Bind address:", config.bind)?;
+    config.public_api.bind = prompt_parse("Public API bind address:", config.public_api.bind)?;
+    config.admin_api.bind = prompt_parse("Admin API bind address:", config.admin_api.bind)?;
     config.public_base_url = prompt_text("Public base URL:", &config.public_base_url)?;
     config.data_dir = PathBuf::from(prompt_text(
         "Data directory:",
@@ -62,27 +63,23 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
         &channel_default,
     )?)?;
 
-    config.tls.mode = Select::new("TLS mode:", vec![WizardTlsMode::Off, WizardTlsMode::Files])
-        .with_starting_cursor(if config.tls.mode == TlsMode::Files {
-            1
-        } else {
-            0
-        })
-        .prompt()
-        .map_err(prompt_error)?
-        .into();
-    if config.tls.mode == TlsMode::Files {
-        config.tls.cert_path = Some(PathBuf::from(prompt_text(
-            "TLS certificate path:",
-            &display_optional_path(config.tls.cert_path.as_deref()),
-        )?));
-        config.tls.key_path = Some(PathBuf::from(prompt_text(
-            "TLS private-key path:",
-            &display_optional_path(config.tls.key_path.as_deref()),
-        )?));
-    } else {
-        config.tls.cert_path = None;
-        config.tls.key_path = None;
+    prompt_listener_tls("Public API", &mut config.public_api)?;
+    prompt_listener_tls("Admin API", &mut config.admin_api)?;
+    let insecure = insecure_listener_names(&config);
+    if !insecure.is_empty() {
+        eprintln!(
+            "WARNING: {} will be reachable beyond loopback without TLS; bearer tokens can be intercepted.",
+            insecure.join(" and ")
+        );
+        if !Confirm::new("Continue with these insecure listener settings?")
+            .with_default(false)
+            .prompt()
+            .map_err(prompt_error)?
+        {
+            return Err(config_error(
+                "configuration cancelled because insecure listeners were not confirmed",
+            ));
+        }
     }
 
     if original.is_some()
@@ -157,6 +154,42 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
 
     print_next_steps(&config);
     Ok(())
+}
+
+fn prompt_listener_tls(label: &str, listener: &mut ListenerConfig) -> Result<()> {
+    listener.tls.mode = Select::new(
+        &format!("{label} TLS mode:"),
+        vec![WizardTlsMode::Off, WizardTlsMode::Files],
+    )
+    .with_starting_cursor(usize::from(listener.tls.mode == TlsMode::Files))
+    .prompt()
+    .map_err(prompt_error)?
+    .into();
+    if listener.tls.mode == TlsMode::Files {
+        listener.tls.cert_path = Some(PathBuf::from(prompt_text(
+            &format!("{label} TLS certificate path:"),
+            &display_optional_path(listener.tls.cert_path.as_deref()),
+        )?));
+        listener.tls.key_path = Some(PathBuf::from(prompt_text(
+            &format!("{label} TLS private-key path:"),
+            &display_optional_path(listener.tls.key_path.as_deref()),
+        )?));
+    } else {
+        listener.tls.cert_path = None;
+        listener.tls.key_path = None;
+    }
+    Ok(())
+}
+
+fn insecure_listener_names(config: &ServerConfig) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if config.public_api.tls.mode == TlsMode::Off && !config.public_api.bind.ip().is_loopback() {
+        names.push("Public API");
+    }
+    if config.admin_api.tls.mode == TlsMode::Off && !config.admin_api.bind.ip().is_loopback() {
+        names.push("Admin API");
+    }
+    names
 }
 
 fn prompt_advanced(config: &mut ServerConfig) -> Result<()> {
@@ -270,9 +303,20 @@ pub fn validate_preflight(config: &ServerConfig, destination: &Path) -> Result<(
             "public_base_url must not contain a query or fragment",
         ));
     }
-    if config.tls.mode == TlsMode::Files {
-        check_readable(config.tls.cert_path.as_deref().unwrap(), "TLS certificate")?;
-        check_readable(config.tls.key_path.as_deref().unwrap(), "TLS private key")?;
+    for (label, tls) in [
+        ("Public API", &config.public_api.tls),
+        ("Admin API", &config.admin_api.tls),
+    ] {
+        if tls.mode == TlsMode::Files {
+            check_readable(
+                tls.cert_path.as_deref().unwrap(),
+                &format!("{label} TLS certificate"),
+            )?;
+            check_readable(
+                tls.key_path.as_deref().unwrap(),
+                &format!("{label} TLS private key"),
+            )?;
+        }
     }
     check_destination(destination)?;
     check_directory_target(&config.data_dir, "data directory")?;
@@ -452,7 +496,13 @@ pub fn render_systemd_unit(config: &ServerConfig, binary: &Path, config_path: &P
         .and_then(Path::parent)
         .map(absolute_path)
         .unwrap_or_else(|| data.join("logs"));
-    let capability = if config.bind.port() < 1024 {
+    let privileged = config.public_api.bind.port() < 1024
+        || config.admin_api.bind.port() < 1024
+        || config
+            .fleet_api
+            .as_ref()
+            .is_some_and(|v| v.bind.port() < 1024);
+    let capability = if privileged {
         "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n"
     } else {
         "CapabilityBoundingSet=\n"
@@ -937,7 +987,7 @@ WantedBy=multi-user.target
 "#;
         assert_eq!(normal, expected_normal);
 
-        config.bind = "0.0.0.0:443".parse().unwrap();
+        config.public_api.bind = "0.0.0.0:443".parse().unwrap();
         let privileged =
             render_systemd_unit(&config, Path::new(SYSTEM_BINARY), Path::new(SYSTEM_CONFIG));
         let expected_privileged = expected_normal.replace(

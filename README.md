@@ -26,13 +26,21 @@ Create a configuration file:
 
 ```toml
 mode = "single-node"
-bind = "0.0.0.0:8080"
 public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
 admin_token = "replace-with-a-long-random-admin-token"
 channels = ["stable", "beta", "experimental", "mature"]
 
-[tls]
+[public_api]
+bind = "127.0.0.1:8080"
+
+[public_api.tls]
+mode = "off"
+
+[admin_api]
+bind = "127.0.0.1:8081"
+
+[admin_api.tls]
 mode = "off"
 ```
 
@@ -42,23 +50,38 @@ Start UDS:
 uds server --config /etc/uds/config.toml --single-node-mode
 ```
 
-Use `tls.mode = "off"` only when TLS is terminated by a reverse proxy or load balancer. If UDS is exposed directly, configure TLS certificate files.
+TLS is configured independently per listener. Use `mode = "off"` on a non-loopback listener only in a trusted private network or behind a TLS-terminating proxy. UDS logs a warning because bearer tokens otherwise cross the network unencrypted.
 
 ## Configuration
 
 ```toml
 mode = "fleet"
-bind = "0.0.0.0:443"
 public_base_url = "https://updates.example.org"
 data_dir = "/var/lib/uds"
 admin_token = "replace-with-a-long-random-admin-token"
 cluster_token = "replace-with-a-long-random-cluster-token"
 channels = ["stable", "beta", "experimental", "mature"]
 
-[tls]
+[public_api]
+bind = "0.0.0.0:443"
+
+[public_api.tls]
 mode = "files"
 cert_path = "/etc/uds/tls/fullchain.pem"
 key_path = "/etc/uds/tls/privkey.pem"
+
+[admin_api]
+bind = "10.20.0.12:8081"
+
+[admin_api.tls]
+mode = "off"
+
+[fleet_api]
+bind = "10.20.0.12:8082"
+fleet_base_url = "http://10.20.0.12:8082"
+
+[fleet_api.tls]
+mode = "off"
 
 [cluster]
 node_id_path = "node-id"
@@ -102,8 +125,10 @@ grace_period_seconds = 300
 
 ### Modes
 
-- `single-node`: disables broadcast discovery, peer reconciliation, replication, and internal peer routes. This is the recommended mode for small organizations.
-- `fleet`: enables the internal fleet shape and background broadcast task. This mode requires `cluster_token`.
+- `single-node`: requires public and admin listeners and forbids `fleet_api`. This is the recommended mode for small organizations.
+- `fleet`: additionally requires `fleet_api`, `fleet_base_url`, and `cluster_token`. Discovery advertises `fleet_base_url`, which must be an absolute HTTP(S) URL using a reachable host or IP, not a wildcard address.
+
+Keep the public listener reachable from update clients, restrict the admin listener to administrator networks, and allow the fleet listener only between UDS nodes. Enforce those boundaries with host or network firewalls. The fleet API uses `/fleet/v1/replication/events`, `/fleet/v1/catalog`, and `/fleet/v1/stats/local/{channel}`. Plain HTTP is supported for private fleet networks but transmits the mandatory cluster token without encryption.
 
 The CLI flag `--single-node-mode` overrides the configuration file and forces single-node mode.
 

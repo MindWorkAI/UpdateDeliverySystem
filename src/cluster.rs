@@ -78,11 +78,20 @@ pub fn spawn_background_tasks(config: ServerConfig, cluster: ClusterState) {
 async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
-    let message = format!("uds:{}:{}", cluster.node_id(), config.public_base_url);
+    let message = presence_message(config, cluster);
     socket
         .send_to(message.as_bytes(), config.cluster.broadcast_addr)
         .await?;
     Ok(())
+}
+
+fn presence_message(config: &ServerConfig, cluster: &ClusterState) -> String {
+    let fleet_base_url = &config
+        .fleet_api
+        .as_ref()
+        .expect("validated fleet_api")
+        .fleet_base_url;
+    format!("uds:{}:{}", cluster.node_id(), fleet_base_url)
 }
 
 async fn load_or_create_node_id(path: impl AsRef<Path>) -> Result<String> {
@@ -98,4 +107,27 @@ async fn load_or_create_node_id(path: impl AsRef<Path>) -> Result<String> {
     let node_id = Uuid::new_v4().to_string();
     fs::write(path, &node_id).await?;
     Ok(node_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{FleetApiConfig, TlsConfig};
+
+    #[tokio::test]
+    async fn discovery_advertises_fleet_base_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::development_default();
+        config.data_dir = temp.path().into();
+        config.mode = ServerMode::Fleet;
+        config.cluster_token = Some("a-long-cluster-token".into());
+        config.fleet_api = Some(FleetApiConfig {
+            bind: "10.20.0.12:8082".parse().unwrap(),
+            fleet_base_url: "http://10.20.0.12:8082".into(),
+            tls: TlsConfig::default(),
+        });
+        let cluster = ClusterState::new(&config).await.unwrap();
+        assert!(presence_message(&config, &cluster).ends_with(":http://10.20.0.12:8082"));
+        assert!(!presence_message(&config, &cluster).contains(&config.public_base_url));
+    }
 }

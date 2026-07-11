@@ -2,29 +2,31 @@ use axum::Router;
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 
-use crate::config::{ServerConfig, TlsMode};
+use crate::config::{TlsConfig, TlsMode};
 use crate::errors::{Result, UdsError};
 
 pub async fn serve(
-    config: ServerConfig,
+    name: &'static str,
+    bind: std::net::SocketAddr,
+    tls: TlsConfig,
     router: Router,
     handle: Handle<std::net::SocketAddr>,
 ) -> Result<()> {
-    match config.tls.mode {
+    match tls.mode {
         TlsMode::Off => {
-            tracing::info!(bind = %config.bind, "starting HTTP server without TLS");
-            axum_server::bind(config.bind)
+            tracing::warn!(listener = name, %bind, "starting HTTP server without TLS");
+            axum_server::bind(bind)
                 .handle(handle)
                 .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .map_err(|error| UdsError::Storage(format!("server failed: {error}")))?;
         }
         TlsMode::Files => {
-            let cert_path = config.tls.cert_path.as_ref().expect("validated cert_path");
-            let key_path = config.tls.key_path.as_ref().expect("validated key_path");
+            let cert_path = tls.cert_path.as_ref().expect("validated cert_path");
+            let key_path = tls.key_path.as_ref().expect("validated key_path");
             let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
-            tracing::info!(bind = %config.bind, "starting HTTPS server with file-based TLS");
-            axum_server::bind_rustls(config.bind, tls_config)
+            tracing::info!(listener = name, %bind, "starting HTTPS server with file-based TLS");
+            axum_server::bind_rustls(bind, tls_config)
                 .handle(handle)
                 .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await

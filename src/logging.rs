@@ -605,7 +605,7 @@ pub fn render_log_event(event: &LogEventLine, color: bool) -> String {
     let fields = event
         .fields
         .iter()
-        .map(|(k, v)| format!("{k} = {}", sanitize(&v.to_string())))
+        .map(|(k, v)| format!("{k} = {v}"))
         .collect::<Vec<_>>()
         .join(", ");
     let extra = if fields.is_empty() {
@@ -685,5 +685,57 @@ mod tests {
         let d: LogEventLine = serde_json::from_str(ndjson_line(&e).trim()).unwrap();
         assert_eq!(d.fields["n"], 4);
         assert!(!d.message.contains('\n'));
+    }
+
+    #[test]
+    fn human_renderer_preserves_json_value_types_without_double_escaping() {
+        let mut fields = BTreeMap::new();
+        fields.insert("array".into(), serde_json::json!(["stable", 2]));
+        fields.insert("bind".into(), Value::from("0.0.0.0:8080"));
+        fields.insert("enabled".into(), Value::from(false));
+        fields.insert(
+            "log_file".into(),
+            Value::from("./uds-data/logs/events_rCURRENT.ndjson"),
+        );
+        fields.insert("missing".into(), Value::Null);
+        fields.insert("number".into(), Value::from(300));
+        fields.insert("object".into(), serde_json::json!({"channel": "beta"}));
+        let event = build_event(
+            ClientIpLoggingMode::Never,
+            LogLevel::Info,
+            LogEventKind::System,
+            "uds",
+            None,
+            fields,
+            "starting UDS",
+        );
+
+        assert_eq!(
+            render_log_event(&event, false),
+            format!(
+                "[{}] Info [uds] [array = [\"stable\",2], bind = \"0.0.0.0:8080\", enabled = false, log_file = \"./uds-data/logs/events_rCURRENT.ndjson\", missing = null, number = 300, object = {{\"channel\":\"beta\"}}] starting UDS",
+                event.timestamp
+            )
+        );
+    }
+
+    #[test]
+    fn human_renderer_json_escapes_unsafe_string_field_contents() {
+        let mut fields = BTreeMap::new();
+        fields.insert("unsafe".into(), Value::from("line\n\x1b[31m\"quoted\""));
+        let event = build_event(
+            ClientIpLoggingMode::Never,
+            LogLevel::Warn,
+            LogEventKind::System,
+            "uds::test",
+            None,
+            fields,
+            "message",
+        );
+
+        let rendered = render_log_event(&event, false);
+        assert!(rendered.contains("unsafe = \"line\\n\\u001b[31m\\\"quoted\\\"\""));
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\x1b'));
     }
 }

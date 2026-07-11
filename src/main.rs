@@ -50,7 +50,9 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
         bind = %config.bind,
         public_base_url = %config.public_base_url,
         tls_mode = ?config.tls.mode,
-        log_file = ?logging.active_file_path(),
+        log_file = logging
+            .active_file_path()
+            .map(|path| tracing::field::display(path.display())),
         node_id = cluster.node_id(),
         "starting UDS"
     );

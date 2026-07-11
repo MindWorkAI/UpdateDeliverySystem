@@ -1,3 +1,8 @@
+//! Asynchronous update and download statistics recording.
+//!
+//! Request handlers enqueue small events while a background actor persists and
+//! rolls them up without adding file-system latency to client downloads.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,73 +20,136 @@ use crate::config::StatsConfig;
 use crate::errors::{Result, UdsError};
 
 #[derive(Debug, Clone)]
+/// Non-blocking facade used by request handlers to record and query statistics.
 pub struct StatsRecorder {
+    /// Stores the sender value used by this UDS component.
     sender: mpsc::Sender<StatsCommand>,
+
+    /// Stores the dropping value used by this UDS component.
     dropping: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// One durable observation that contributes to channel statistics.
 pub struct StatsEvent {
+    /// The kind carried by this UDS data contract.
     pub kind: StatsEventKind,
+
+    /// The channel carried by this UDS data contract.
     pub channel: String,
+
+    /// The version carried by this UDS data contract.
     pub version: Option<String>,
+
+    /// The target carried by this UDS data contract.
     pub target: Option<String>,
+
+    /// The arch carried by this UDS data contract.
     pub arch: Option<String>,
+
+    /// The bytes carried by this UDS data contract.
     pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Request activity categories tracked by UDS.
 pub enum StatsEventKind {
+    /// Represents the item case in UDS.
     UpdateCheck,
+
+    /// Represents the item case in UDS.
     Download,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Aggregated update and download totals for one release channel.
 pub struct ChannelStats {
+    /// The update checks carried by this UDS data contract.
     pub update_checks: u64,
+
+    /// The downloads carried by this UDS data contract.
     pub downloads: u64,
+
+    /// The traffic bytes carried by this UDS data contract.
     pub traffic_bytes: u64,
+
+    /// The by platform carried by this UDS data contract.
     pub by_platform: BTreeMap<String, PlatformStats>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Download totals and traffic volume for one platform key.
 pub struct PlatformStats {
+    /// The downloads carried by this UDS data contract.
     pub downloads: u64,
+
+    /// The traffic bytes carried by this UDS data contract.
     pub traffic_bytes: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Durable bookkeeping used to resume aggregation after a restart.
 struct RollupState {
+    /// Stores the channels value used by this UDS component.
     #[serde(default)]
     channels: BTreeMap<String, ChannelStats>,
+
+    /// Stores the included deltas value used by this UDS component.
     #[serde(default)]
     included_deltas: BTreeSet<String>,
 }
 
+/// Commands serialized through the statistics actor.
 enum StatsCommand {
+    /// Represents the item concept used by UDS.
     Event(StatsEvent),
+
+    /// Represents the item concept used by UDS.
     Flush {
+        /// Stores the response value used by this UDS component.
         response: oneshot::Sender<()>,
     },
+
+    /// Represents the item concept used by UDS.
     ChannelStats {
+        /// Stores the channel value used by this UDS component.
         channel: String,
+
+        /// Stores the response value used by this UDS component.
         response: oneshot::Sender<Result<ChannelStats>>,
     },
 }
 
+/// Single-owner state machine responsible for statistics persistence.
 struct StatsActor {
+    /// Stores the events dir value used by this UDS component.
     events_dir: PathBuf,
+
+    /// Stores the processing dir value used by this UDS component.
     processing_dir: PathBuf,
+
+    /// Stores the deltas dir value used by this UDS component.
     deltas_dir: PathBuf,
+
+    /// Stores the rejected dir value used by this UDS component.
     rejected_dir: PathBuf,
+
+    /// Stores the rollup path value used by this UDS component.
     rollup_path: PathBuf,
+
+    /// Stores the config value used by this UDS component.
     config: StatsConfig,
+
+    /// Stores the pending events value used by this UDS component.
     pending_events: usize,
+
+    /// Stores the dropping value used by this UDS component.
     dropping: Arc<AtomicBool>,
 }
 
 impl StatsRecorder {
+    /// Creates and initializes this UDS component from validated runtime input.
     pub async fn new(data_dir: PathBuf, config: StatsConfig) -> Result<Self> {
         let stats_root = data_dir.join("stats");
         reject_legacy_stats(&stats_root).await?;
@@ -92,6 +160,7 @@ impl StatsRecorder {
         Ok(Self { sender, dropping })
     }
 
+    /// Applies the record mutation while preserving UDS consistency guarantees.
     pub fn record(&self, event: StatsEvent) -> bool {
         match self.sender.try_send(StatsCommand::Event(event)) {
             Ok(()) => true,
@@ -104,6 +173,7 @@ impl StatsRecorder {
         }
     }
 
+    /// Provides the channel stats operation used by UDS callers.
     pub async fn channel_stats(&self, channel: &str) -> Result<ChannelStats> {
         let (sender, receiver) = oneshot::channel();
         self.sender
@@ -113,24 +183,26 @@ impl StatsRecorder {
             })
             .await
             .map_err(|_| UdsError::Storage("statistics recorder is unavailable".to_string()))?;
-        receiver.await.map_err(|_| {
-            UdsError::Storage("statistics recorder stopped before answering".to_string())
-        })?
+        receiver
+            .await
+            .map_err(|_| UdsError::Storage("statistics recorder stopped before answering".to_string()))?
     }
 
+    /// Provides the flush operation used by UDS callers.
     pub async fn flush(&self) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(StatsCommand::Flush { response: sender })
             .await
             .map_err(|_| UdsError::Storage("statistics recorder is unavailable".to_string()))?;
-        receiver.await.map_err(|_| {
-            UdsError::Storage("statistics recorder stopped before flushing".to_string())
-        })
+        receiver
+            .await
+            .map_err(|_| UdsError::Storage("statistics recorder stopped before flushing".to_string()))
     }
 }
 
 impl StatsActor {
+    /// Performs the new operation required by UDS.
     async fn new(stats_root: PathBuf, config: StatsConfig) -> Result<Self> {
         let events_dir = stats_root.join("events");
         let processing_dir = stats_root.join("processing");
@@ -165,9 +237,9 @@ impl StatsActor {
         Ok(actor)
     }
 
+    /// Performs the run operation required by UDS.
     async fn run(mut self, mut receiver: mpsc::Receiver<StatsCommand>) {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.config.rollup_interval_seconds));
+        let mut interval = tokio::time::interval(Duration::from_secs(self.config.rollup_interval_seconds));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
@@ -198,6 +270,7 @@ impl StatsActor {
         }
     }
 
+    /// Performs the persist event operation required by UDS.
     async fn persist_event(&mut self, event: StatsEvent) {
         if self.pending_events >= self.config.max_pending_events {
             if !self.dropping.swap(true, Ordering::Relaxed) {
@@ -229,6 +302,7 @@ impl StatsActor {
         }
     }
 
+    /// Performs the rollup events operation required by UDS.
     async fn rollup_events(&mut self) -> Result<()> {
         let event_paths = file_paths(&self.events_dir).await?;
         if event_paths.is_empty() {
@@ -248,6 +322,7 @@ impl StatsActor {
         self.compact_if_needed().await
     }
 
+    /// Performs the process batch operation required by UDS.
     async fn process_batch(&self, batch_id: &str, batch_dir: &Path) -> Result<usize> {
         let delta_path = self.deltas_dir.join(format!("{batch_id}.json"));
         if delta_path.exists() {
@@ -278,6 +353,7 @@ impl StatsActor {
         Ok(count)
     }
 
+    /// Performs the recover processing operation required by UDS.
     async fn recover_processing(&mut self) -> Result<()> {
         let mut entries = fs::read_dir(&self.processing_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -291,6 +367,7 @@ impl StatsActor {
         Ok(())
     }
 
+    /// Performs the compact if needed operation required by UDS.
     async fn compact_if_needed(&self) -> Result<()> {
         if count_files(&self.deltas_dir).await? < 96 {
             return Ok(());
@@ -298,6 +375,7 @@ impl StatsActor {
         self.compact().await
     }
 
+    /// Performs the compact operation required by UDS.
     async fn compact(&self) -> Result<()> {
         let mut state = self.read_rollup_state().await?;
         let delta_paths = file_paths(&self.deltas_dir).await?;
@@ -311,8 +389,7 @@ impl StatsActor {
             if state.included_deltas.contains(&id) {
                 continue;
             }
-            let delta: BTreeMap<String, ChannelStats> =
-                serde_json::from_slice(&fs::read(&path).await?)?;
+            let delta: BTreeMap<String, ChannelStats> = serde_json::from_slice(&fs::read(&path).await?)?;
             merge_stats(&mut state.channels, delta);
             included.insert(id);
         }
@@ -324,6 +401,7 @@ impl StatsActor {
         self.finish_interrupted_compaction().await
     }
 
+    /// Performs the finish interrupted compaction operation required by UDS.
     async fn finish_interrupted_compaction(&self) -> Result<()> {
         let mut state = self.read_rollup_state().await?;
         if state.included_deltas.is_empty() {
@@ -339,6 +417,7 @@ impl StatsActor {
         atomic_write_json(self.rollup_path.clone(), &state).await
     }
 
+    /// Performs the current totals operation required by UDS.
     async fn current_totals(&self) -> Result<BTreeMap<String, ChannelStats>> {
         let state = self.read_rollup_state().await?;
         let mut totals = state.channels;
@@ -351,13 +430,13 @@ impl StatsActor {
             if state.included_deltas.contains(&id) {
                 continue;
             }
-            let delta: BTreeMap<String, ChannelStats> =
-                serde_json::from_slice(&fs::read(path).await?)?;
+            let delta: BTreeMap<String, ChannelStats> = serde_json::from_slice(&fs::read(path).await?)?;
             merge_stats(&mut totals, delta);
         }
         Ok(totals)
     }
 
+    /// Performs the read rollup state operation required by UDS.
     async fn read_rollup_state(&self) -> Result<RollupState> {
         if !self.rollup_path.exists() {
             return Ok(RollupState::default());
@@ -366,6 +445,7 @@ impl StatsActor {
     }
 }
 
+/// Performs the reject legacy stats operation required by UDS.
 async fn reject_legacy_stats(stats_root: &Path) -> Result<()> {
     let legacy_raw = stats_root.join("raw");
     if legacy_raw.exists() {
@@ -380,12 +460,11 @@ async fn reject_legacy_stats(stats_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Performs the apply event operation required by UDS.
 fn apply_event(rollup: &mut BTreeMap<String, ChannelStats>, event: StatsEvent) {
     let channel = rollup.entry(event.channel).or_default();
     match event.kind {
-        StatsEventKind::UpdateCheck => {
-            channel.update_checks = channel.update_checks.saturating_add(1)
-        }
+        StatsEventKind::UpdateCheck => channel.update_checks = channel.update_checks.saturating_add(1),
         StatsEventKind::Download => {
             channel.downloads = channel.downloads.saturating_add(1);
             channel.traffic_bytes = channel.traffic_bytes.saturating_add(event.bytes);
@@ -400,10 +479,8 @@ fn apply_event(rollup: &mut BTreeMap<String, ChannelStats>, event: StatsEvent) {
     }
 }
 
-fn merge_stats(
-    target: &mut BTreeMap<String, ChannelStats>,
-    source: BTreeMap<String, ChannelStats>,
-) {
+/// Performs the merge stats operation required by UDS.
+fn merge_stats(target: &mut BTreeMap<String, ChannelStats>, source: BTreeMap<String, ChannelStats>) {
     for (channel, source_stats) in source {
         let target_stats = target.entry(channel).or_default();
         target_stats.update_checks = target_stats
@@ -427,6 +504,7 @@ fn merge_stats(
     }
 }
 
+/// Performs the file paths operation required by UDS.
 async fn file_paths(directory: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let mut entries = fs::read_dir(directory).await?;
@@ -439,10 +517,12 @@ async fn file_paths(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Performs the count files operation required by UDS.
 async fn count_files(directory: &Path) -> Result<usize> {
     Ok(file_paths(directory).await?.len())
 }
 
+/// Performs the atomic write json operation required by UDS.
 async fn atomic_write_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -475,6 +555,7 @@ mod tests {
         }
     }
 
+    /// Verifies that channel query flushes queued events.
     #[tokio::test]
     async fn channel_query_flushes_queued_events() {
         let temp = tempfile::tempdir().unwrap();
@@ -499,6 +580,7 @@ mod tests {
         );
     }
 
+    /// Verifies that download rollup is saturating and platform specific.
     #[tokio::test]
     async fn download_rollup_is_saturating_and_platform_specific() {
         let mut stats = BTreeMap::new();
@@ -520,6 +602,7 @@ mod tests {
         );
     }
 
+    /// Verifies that recovers processing batch without double counting.
     #[tokio::test]
     async fn recovers_processing_batch_without_double_counting() {
         let temp = tempfile::tempdir().unwrap();
@@ -551,6 +634,7 @@ mod tests {
         );
     }
 
+    /// Verifies that rejects non empty legacy event directory.
     #[tokio::test]
     async fn rejects_non_empty_legacy_event_directory() {
         let temp = tempfile::tempdir().unwrap();

@@ -1,3 +1,8 @@
+//! Release import preparation for Tauri manifests and local artifacts.
+//!
+//! External metadata is normalized before upload so the server receives a
+//! predictable multipart representation.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,39 +19,72 @@ use crate::errors::{Result, UdsError};
 use crate::models::{ReleaseUploadMetadata, UploadPlatformMetadata, UploadPolicy};
 
 #[derive(Debug, Deserialize)]
+/// Static update manifest format published by Tauri-compatible releases.
 pub struct TauriStaticRelease {
+    /// Stores the version value used by this UDS component.
     pub version: String,
+
+    /// Stores the notes value used by this UDS component.
     #[serde(default)]
     pub notes: String,
+
+    /// Stores the pub date value used by this UDS component.
     #[serde(default)]
     pub pub_date: Option<String>,
+
+    /// Stores the platforms value used by this UDS component.
     pub platforms: BTreeMap<String, TauriStaticPlatform>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Platform-specific entry inside a Tauri static update manifest.
 pub struct TauriStaticPlatform {
+    /// Stores the url value used by this UDS component.
     pub url: String,
+
+    /// Stores the signature value used by this UDS component.
     pub signature: String,
 }
 
 #[derive(Debug)]
+/// Validated metadata and artifacts ready for an administrative upload.
 pub struct PreparedUpload {
+    /// Stores the metadata value used by this UDS component.
     pub metadata: ReleaseUploadMetadata,
+
+    /// Stores the artifacts value used by this UDS component.
     pub artifacts: Vec<PreparedArtifact>,
+
+    /// Stores the temp dir value used by this UDS component.
     _temp_dir: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug, Clone)]
+/// One local or downloaded artifact prepared for multipart streaming.
 pub struct PreparedArtifact {
+    /// Stores the field name value used by this UDS component.
     pub field_name: String,
+
+    /// Stores the platform value used by this UDS component.
     pub platform: String,
+
+    /// Stores the file name value used by this UDS component.
     pub file_name: String,
+
+    /// Stores the source url value used by this UDS component.
     pub source_url: String,
+
+    /// Stores the path value used by this UDS component.
     pub path: PathBuf,
+
+    /// Stores the size value used by this UDS component.
     pub size: u64,
+
+    /// Stores the sha256 value used by this UDS component.
     pub sha256: String,
 }
 
+/// Performs the prepare from remote operation required by UDS.
 pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Result<PreparedUpload> {
     let client = Client::builder()
         .user_agent("uds-client")
@@ -54,8 +92,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
         .build()
         .map_err(|error| UdsError::Config(format!("failed to create HTTP client: {error}")))?;
     let latest_json_url = normalize_github_release_url(input_url)?;
-    let release =
-        fetch_release_metadata(&client, latest_json_url.clone(), policy.max_metadata_bytes).await?;
+    let release = fetch_release_metadata(&client, latest_json_url.clone(), policy.max_metadata_bytes).await?;
     validate_platform_count(&release, policy)?;
     let temp_dir = tempfile::Builder::new()
         .prefix("uds-client-upload-")
@@ -67,9 +104,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
     for (index, (platform, platform_release)) in release.platforms.iter().enumerate() {
         let artifact_url = Url::parse(&platform_release.url)
             .or_else(|_| latest_json_url.join(&platform_release.url))
-            .map_err(|error| {
-                UdsError::BadRequest(format!("invalid artifact URL for {platform}: {error}"))
-            })?;
+            .map_err(|error| UdsError::BadRequest(format!("invalid artifact URL for {platform}: {error}")))?;
         let file_name = artifact_file_name(&artifact_url)?;
         let field_name = format!("artifact_{index}");
         let path = temp_dir.path().join(&field_name);
@@ -119,6 +154,7 @@ pub async fn prepare_from_remote(input_url: &str, policy: &UploadPolicy) -> Resu
     })
 }
 
+/// Performs the prepare from local operation required by UDS.
 pub async fn prepare_from_local(
     latest_json_path: &Path,
     artifact_dir: &Path,
@@ -195,11 +231,8 @@ pub async fn prepare_from_local(
     })
 }
 
-async fn fetch_release_metadata(
-    client: &Client,
-    url: Url,
-    limit: u64,
-) -> Result<TauriStaticRelease> {
+/// Performs the fetch release metadata operation required by UDS.
+async fn fetch_release_metadata(client: &Client, url: Url, limit: u64) -> Result<TauriStaticRelease> {
     let response = client
         .get(url)
         .timeout(Duration::from_secs(30))
@@ -219,8 +252,7 @@ async fn fetch_release_metadata(
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| UdsError::Storage(format!("failed to read latest.json: {error}")))?;
+        let chunk = chunk.map_err(|error| UdsError::Storage(format!("failed to read latest.json: {error}")))?;
         if bytes.len().saturating_add(chunk.len()) as u64 > limit {
             return Err(UdsError::PayloadTooLarge(
                 "latest.json exceeds the server's metadata limit".to_string(),
@@ -235,12 +267,8 @@ async fn fetch_release_metadata(
     })
 }
 
-async fn download_artifact(
-    client: &Client,
-    url: Url,
-    path: &Path,
-    limit: u64,
-) -> Result<(u64, String)> {
+/// Performs the download artifact operation required by UDS.
+async fn download_artifact(client: &Client, url: Url, path: &Path, limit: u64) -> Result<(u64, String)> {
     let response = client
         .get(url)
         .timeout(Duration::from_secs(30 * 60))
@@ -262,8 +290,7 @@ async fn download_artifact(
     let mut size = 0u64;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| UdsError::Storage(format!("failed to read artifact: {error}")))?;
+        let chunk = chunk.map_err(|error| UdsError::Storage(format!("failed to read artifact: {error}")))?;
         size = size.saturating_add(chunk.len() as u64);
         if size > limit {
             return Err(UdsError::PayloadTooLarge(
@@ -277,6 +304,7 @@ async fn download_artifact(
     Ok((size, hex::encode(hasher.finalize())))
 }
 
+/// Performs the hash local artifact operation required by UDS.
 async fn hash_local_artifact(path: &Path, limit: u64) -> Result<(u64, String)> {
     let size = fs::metadata(path).await?.len();
     if size > limit {
@@ -298,6 +326,7 @@ async fn hash_local_artifact(path: &Path, limit: u64) -> Result<(u64, String)> {
     Ok((size, hex::encode(hasher.finalize())))
 }
 
+/// Performs the validate platform count operation required by UDS.
 fn validate_platform_count(release: &TauriStaticRelease, policy: &UploadPolicy) -> Result<()> {
     if release.platforms.is_empty() || release.platforms.len() > policy.max_platforms {
         return Err(UdsError::BadRequest(format!(
@@ -308,10 +337,8 @@ fn validate_platform_count(release: &TauriStaticRelease, policy: &UploadPolicy) 
     Ok(())
 }
 
-fn validate_serialized_metadata(
-    metadata: &ReleaseUploadMetadata,
-    policy: &UploadPolicy,
-) -> Result<()> {
+/// Performs the validate serialized metadata operation required by UDS.
+fn validate_serialized_metadata(metadata: &ReleaseUploadMetadata, policy: &UploadPolicy) -> Result<()> {
     if serde_json::to_vec(metadata)?.len() as u64 > policy.max_metadata_bytes {
         return Err(UdsError::PayloadTooLarge(
             "release metadata exceeds the server's metadata limit".to_string(),
@@ -320,9 +347,9 @@ fn validate_serialized_metadata(
     Ok(())
 }
 
+/// Performs the normalize github release url operation required by UDS.
 pub fn normalize_github_release_url(input: &str) -> Result<Url> {
-    let url =
-        Url::parse(input).map_err(|error| UdsError::BadRequest(format!("invalid URL: {error}")))?;
+    let url = Url::parse(input).map_err(|error| UdsError::BadRequest(format!("invalid URL: {error}")))?;
     if url.path().ends_with("/latest.json") {
         return Ok(url);
     }
@@ -344,44 +371,39 @@ pub fn normalize_github_release_url(input: &str) -> Result<Url> {
         } else {
             format!("https://github.com/{owner}/{repo}/releases/{release_selector}")
         };
-        return Url::parse(&normalized).map_err(|error| {
-            UdsError::BadRequest(format!("invalid normalized GitHub URL: {error}"))
-        });
+        return Url::parse(&normalized)
+            .map_err(|error| UdsError::BadRequest(format!("invalid normalized GitHub URL: {error}")));
     }
     Ok(url)
 }
 
+/// Performs the artifact file name operation required by UDS.
 fn artifact_file_name(url: &Url) -> Result<String> {
     url.path_segments()
         .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            UdsError::BadRequest(format!("could not determine artifact file name from {url}"))
-        })
+        .ok_or_else(|| UdsError::BadRequest(format!("could not determine artifact file name from {url}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Verifies that normalizes github latest release url.
     #[test]
     fn normalizes_github_latest_release_url() {
-        let url =
-            normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/latest")
-                .unwrap();
+        let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/latest").unwrap();
         assert_eq!(
             url.as_str(),
             "https://github.com/MindWorkAI/AI-Studio/releases/latest/download/latest.json"
         );
     }
 
+    /// Verifies that normalizes github tag url.
     #[test]
     fn normalizes_github_tag_url() {
-        let url = normalize_github_release_url(
-            "https://github.com/MindWorkAI/AI-Studio/releases/tag/v26.7.2",
-        )
-        .unwrap();
+        let url = normalize_github_release_url("https://github.com/MindWorkAI/AI-Studio/releases/tag/v26.7.2").unwrap();
         assert_eq!(
             url.as_str(),
             "https://github.com/MindWorkAI/AI-Studio/releases/download/v26.7.2/latest.json"

@@ -1,3 +1,8 @@
+//! Fleet identity, peer discovery, and replication coordination.
+//!
+//! Every UDS node needs a stable identity and a lightweight view of its peers
+//! so mutations received through a load balancer can reach the complete fleet.
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,18 +20,31 @@ use crate::errors::Result;
 use crate::models::ReplicationEvent;
 
 #[derive(Debug, Clone)]
+/// Shared cluster identity and peer state for one running UDS node.
 pub struct ClusterState {
+    /// Stores the node id value used by this UDS component.
     node_id: String,
+
+    /// Stores the enabled value used by this UDS component.
     enabled: bool,
+
+    /// Stores the peers value used by this UDS component.
     peers: Arc<Mutex<BTreeSet<String>>>,
+
+    /// Stores the cluster token value used by this UDS component.
     cluster_token: Option<String>,
 }
 
 impl ClusterState {
+    /// Creates cluster state from the validated server configuration.
     pub async fn new(config: &ServerConfig) -> Result<Self> {
+        // Is the server running in fleet mode?
         let enabled = config.mode == ServerMode::Fleet;
-        let node_id =
-            load_or_create_node_id(config.data_dir.join(&config.cluster.node_id_path)).await?;
+
+        // Load the configured node ID. Create and persist a new ID when this
+        // node has not been initialized yet.
+        let node_id = load_or_create_node_id(config.data_dir.join(&config.cluster.node_id_path)).await?;
+
         Ok(Self {
             node_id,
             enabled,
@@ -35,14 +53,17 @@ impl ClusterState {
         })
     }
 
+    /// Returns whether peer discovery and replication are enabled.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Returns the stable identifier used to distinguish this node in a fleet.
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
+    /// Queues a release mutation for known peers.
     pub async fn replicate_event(&self, event: ReplicationEvent) -> bool {
         if !self.enabled {
             return false;
@@ -57,10 +78,12 @@ impl ClusterState {
         !peers.is_empty()
     }
 
+    /// Returns a snapshot of the currently known fleet peer URLs.
     pub async fn peers(&self) -> Vec<String> {
         self.peers.lock().await.iter().cloned().collect()
     }
 
+    /// Sends the complete admin-token state to every known peer.
     pub async fn replicate_auth_snapshot(&self, records: &[AdminTokenRecord]) -> bool {
         if !self.enabled {
             return true;
@@ -90,6 +113,7 @@ impl ClusterState {
     }
 }
 
+/// Starts peer-discovery work for a fleet-enabled node.
 pub fn spawn_background_tasks(config: ServerConfig, cluster: ClusterState) {
     if !cluster.enabled() {
         return;
@@ -106,6 +130,7 @@ pub fn spawn_background_tasks(config: ServerConfig, cluster: ClusterState) {
     });
 }
 
+/// Performs the broadcast presence operation required by UDS.
 async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
@@ -116,6 +141,7 @@ async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Re
     Ok(())
 }
 
+/// Performs the presence message operation required by UDS.
 fn presence_message(config: &ServerConfig, cluster: &ClusterState) -> String {
     let fleet_base_url = &config
         .fleet_api
@@ -125,6 +151,7 @@ fn presence_message(config: &ServerConfig, cluster: &ClusterState) -> String {
     format!("uds:{}:{}", cluster.node_id(), fleet_base_url)
 }
 
+/// Performs the load or create node id operation required by UDS.
 async fn load_or_create_node_id(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
     if path.exists() {
@@ -145,6 +172,7 @@ mod tests {
     use super::*;
     use crate::config::{FleetApiConfig, TlsConfig};
 
+    /// Verifies that discovery advertises fleet base url.
     #[tokio::test]
     async fn discovery_advertises_fleet_base_url() {
         let temp = tempfile::tempdir().unwrap();

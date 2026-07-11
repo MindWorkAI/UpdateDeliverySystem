@@ -1,3 +1,8 @@
+//! Axum authentication extractors for admin, owner, and fleet access.
+//!
+//! Central extractors keep authorization decisions consistent across route
+//! handlers and attach authenticated identities to audit metadata.
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, header};
@@ -9,21 +14,21 @@ use crate::logging::{LogEventKind, RequestMetadata};
 use crate::routes::AppState;
 
 #[derive(Debug, Clone)]
+/// Authenticated personal administrator accepted by protected admin routes.
 pub struct AdminAuth(pub ActorIdentity);
 
 #[derive(Debug, Clone)]
+/// Break-glass owner identity accepted by token-management routes.
 pub struct OwnerAuth(pub ActorIdentity);
 
 #[derive(Debug, Clone, Copy)]
+/// Marker proving that a request supplied the shared fleet credential.
 pub struct ClusterAuth;
 
 impl FromRequestParts<AppState> for AdminAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = bearer(&parts.headers) else {
             security_failure(parts, state, "admin", "missing");
             return Err(UdsError::Unauthorized);
@@ -49,10 +54,7 @@ impl FromRequestParts<AppState> for AdminAuth {
 
 impl FromRequestParts<AppState> for OwnerAuth {
     type Rejection = UdsError;
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = bearer(&parts.headers) else {
             security_failure(parts, state, "owner", "missing");
             return Err(UdsError::Unauthorized);
@@ -70,6 +72,7 @@ impl FromRequestParts<AppState> for OwnerAuth {
     }
 }
 
+/// Performs the record actor operation required by UDS.
 fn record_actor(parts: &Parts, actor: &ActorIdentity) {
     if let Some(request) = parts.extensions.get::<RequestMetadata>()
         && let Ok(mut slot) = request.actor.lock()
@@ -81,10 +84,7 @@ fn record_actor(parts: &Parts, actor: &ActorIdentity) {
 impl FromRequestParts<AppState> for ClusterAuth {
     type Rejection = UdsError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let Some(token) = &state.config.cluster_token else {
             security_failure(parts, state, "cluster", "invalid");
             return Err(UdsError::Unauthorized);
@@ -97,6 +97,7 @@ impl FromRequestParts<AppState> for ClusterAuth {
     }
 }
 
+/// Performs the require bearer operation required by UDS.
 fn require_bearer(headers: &HeaderMap, expected_token: &str) -> Result<(), &'static str> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err("missing");
@@ -117,6 +118,7 @@ fn require_bearer(headers: &HeaderMap, expected_token: &str) -> Result<(), &'sta
     }
 }
 
+/// Performs the bearer operation required by UDS.
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
@@ -125,6 +127,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+/// Performs the disabled token operation required by UDS.
 fn disabled_token(parts: &Parts, state: &AppState, id: uuid::Uuid) {
     let request = parts.extensions.get::<RequestMetadata>();
     let mut fields = std::collections::BTreeMap::new();
@@ -144,6 +147,7 @@ fn disabled_token(parts: &Parts, state: &AppState, id: uuid::Uuid) {
     state.logging.emit(&event);
 }
 
+/// Performs the security failure operation required by UDS.
 fn security_failure(parts: &Parts, state: &AppState, scope: &str, reason: &str) {
     let request = parts.extensions.get::<RequestMetadata>();
     let mut fields = std::collections::BTreeMap::new();
@@ -173,6 +177,7 @@ fn security_failure(parts: &Parts, state: &AppState, scope: &str, reason: &str) 
     state.logging.emit(&event);
 }
 
+/// Performs the constant time eq operation required by UDS.
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;

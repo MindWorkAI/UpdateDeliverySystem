@@ -1,3 +1,5 @@
+//! Authenticated HTTP transport used by UDS administration workflows.
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
@@ -10,9 +12,7 @@ use crate::client::config::ClientProfile;
 use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
 use crate::logging::LogEventLine;
-use crate::models::{
-    ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy,
-};
+use crate::models::{ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy};
 use crate::stats::ChannelStats;
 use zeroize::Zeroize;
 
@@ -23,21 +23,30 @@ impl Drop for AdminClient {
 }
 
 #[derive(Debug, Clone)]
+/// API client bound to one configured UDS administration endpoint.
 pub struct AdminClient {
+    /// Reuses connections and applies the transport settings for admin requests.
     http: reqwest::Client,
+
+    /// Identifies the configured UDS node without a trailing slash.
     base_url: String,
+
+    /// Authorizes requests and is wiped when the client is dropped.
     admin_token: String,
 }
 
 impl AdminClient {
+    /// Creates a client that uses the profile's normal administrator token.
     pub fn new(profile: &ClientProfile) -> Result<Self> {
         Self::with_token(profile, profile.admin_token.clone())
     }
 
+    /// Creates a client for owner-only break-glass token management calls.
     pub fn with_owner_token(profile: &ClientProfile, owner_token: String) -> Result<Self> {
         Self::with_token(profile, owner_token)
     }
 
+    /// Builds the shared HTTP transport and normalizes its endpoint URL.
     fn with_token(profile: &ClientProfile, admin_token: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("uds-client")
@@ -51,9 +60,12 @@ impl AdminClient {
         })
     }
 
+    /// Retrieves safe metadata for all administrator tokens.
     pub async fn admin_tokens(&self) -> Result<Vec<AdminTokenMetadata>> {
         self.get_json("/admin/v1/admin-tokens").await
     }
+
+    /// Creates an administrator token whose secret is returned exactly once.
     pub async fn create_admin_token(&self, name: &str, reason: &str) -> Result<CreatedAdminToken> {
         self.post_json(
             "/admin/v1/admin-tokens",
@@ -61,6 +73,8 @@ impl AdminClient {
         )
         .await
     }
+
+    /// Enables or disables an administrator token with an auditable reason.
     pub async fn set_admin_token_enabled(
         &self,
         id: uuid::Uuid,
@@ -74,28 +88,26 @@ impl AdminClient {
         .await
     }
 
+    /// Lists the releases currently known in one update channel.
     pub async fn list_releases(&self, channel: &str) -> Result<ReleaseListResponse> {
         self.get_json(&format!("/admin/v1/channels/{channel}/releases"))
             .await
     }
 
+    /// Fetches server limits before the client prepares an upload.
     pub async fn upload_policy(&self) -> Result<UploadPolicy> {
         self.get_json("/admin/v1/upload-policy").await
     }
 
-    pub async fn upload_release(
-        &self,
-        channel: &str,
-        upload: &PreparedUpload,
-    ) -> Result<MutationResponse> {
+    /// Streams release metadata and artifacts to the selected channel.
+    pub async fn upload_release(&self, channel: &str, upload: &PreparedUpload) -> Result<MutationResponse> {
         let metadata = serde_json::to_string(&upload.metadata)?;
         let mut form = Form::new().text("metadata", metadata);
         for artifact in &upload.artifacts {
             let file = tokio::fs::File::open(&artifact.path).await?;
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = reqwest::Body::wrap_stream(stream);
-            let part =
-                Part::stream_with_length(body, artifact.size).file_name(artifact.file_name.clone());
+            let part = Part::stream_with_length(body, artifact.size).file_name(artifact.file_name.clone());
             form = form.part(artifact.field_name.clone(), part);
         }
 
@@ -111,12 +123,8 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
-    pub async fn patch_changelog(
-        &self,
-        channel: &str,
-        version: &str,
-        notes: String,
-    ) -> Result<MutationResponse> {
+    /// Performs the patch changelog operation required by UDS.
+    pub async fn patch_changelog(&self, channel: &str, version: &str, notes: String) -> Result<MutationResponse> {
         self.patch_json(
             &format!("/admin/v1/channels/{channel}/releases/{version}/changelog"),
             &ChangelogPatchRequest { notes },
@@ -124,6 +132,7 @@ impl AdminClient {
         .await
     }
 
+    /// Performs the withdraw release operation required by UDS.
     pub async fn withdraw_release(&self, channel: &str, version: &str) -> Result<MutationResponse> {
         let response = self
             .http
@@ -136,6 +145,7 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
+    /// Performs the copy release operation required by UDS.
     pub async fn copy_release(
         &self,
         source_channel: &str,
@@ -152,11 +162,13 @@ impl AdminClient {
         .await
     }
 
+    /// Performs the channel stats operation required by UDS.
     pub async fn channel_stats(&self, channel: &str) -> Result<ChannelStats> {
         self.get_json(&format!("/admin/v1/channels/{channel}/stats"))
             .await
     }
 
+    /// Performs the recent logs operation required by UDS.
     pub async fn recent_logs(&self, lines: usize) -> Result<Vec<LogEventLine>> {
         let text = self
             .get_text(&format!("/admin/v1/logs/recent?lines={lines}"))
@@ -164,6 +176,7 @@ impl AdminClient {
         parse_ndjson_events(&text)
     }
 
+    /// Performs the stream logs operation required by UDS.
     pub async fn stream_logs<F>(&self, lines: usize, mut on_event: F) -> Result<()>
     where
         F: FnMut(LogEventLine),
@@ -223,6 +236,7 @@ impl AdminClient {
         }
     }
 
+    /// Performs the get json operation required by UDS.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let response = self
             .http
@@ -235,6 +249,7 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
+    /// Performs the get text operation required by UDS.
     async fn get_text(&self, path: &str) -> Result<String> {
         let response = self
             .http
@@ -247,11 +262,8 @@ impl AdminClient {
         parse_text_response(response).await
     }
 
-    async fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<R> {
+    /// Performs the post json operation required by UDS.
+    async fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
         let response = self
             .http
             .post(self.url(path))
@@ -264,11 +276,8 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
-    async fn patch_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<R> {
+    /// Performs the patch json operation required by UDS.
+    async fn patch_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
         let response = self
             .http
             .patch(self.url(path))
@@ -281,22 +290,24 @@ impl AdminClient {
         parse_json_response(response).await
     }
 
+    /// Performs the url operation required by UDS.
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
 }
 
+/// Performs the display path operation required by UDS.
 pub fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-async fn parse_json_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
-) -> Result<T> {
+/// Performs the parse json response operation required by UDS.
+async fn parse_json_response<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
     let text = parse_text_response(response).await?;
     serde_json::from_str(&text).map_err(UdsError::Json)
 }
 
+/// Performs the parse text response operation required by UDS.
 async fn parse_text_response(response: reqwest::Response) -> Result<String> {
     let status = response.status();
     let text = response
@@ -311,6 +322,7 @@ async fn parse_text_response(response: reqwest::Response) -> Result<String> {
     Ok(text)
 }
 
+/// Performs the parse ndjson events operation required by UDS.
 fn parse_ndjson_events(text: &str) -> Result<Vec<LogEventLine>> {
     text.lines()
         .filter(|line| !line.trim().is_empty())

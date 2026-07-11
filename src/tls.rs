@@ -1,3 +1,8 @@
+//! HTTP listener startup with optional file-based TLS.
+//!
+//! Centralizing listener setup ensures all public, admin, and fleet APIs apply
+//! the same transport behavior.
+
 use axum::Router;
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
@@ -5,6 +10,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use crate::config::{TlsConfig, TlsMode};
 use crate::errors::{Result, UdsError};
 
+/// Runs the serve workflow for UDS.
 pub async fn serve(
     name: &'static str,
     bind: std::net::SocketAddr,

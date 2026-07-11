@@ -1,10 +1,15 @@
+//! Build-time integration that exposes the UDS build number to the executable.
 use std::{env, fs, path::Path};
 
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
-    let manifest =
-        fs::read_to_string(Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml"))
-            .expect("failed to read Cargo.toml");
+
+    // Read the manifest explicitly because the UDS build number lives in
+    // package metadata instead of Cargo's standard package fields.
+    let manifest_directory = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_path = Path::new(&manifest_directory).join("Cargo.toml");
+    let manifest = fs::read_to_string(manifest_path).expect("failed to read Cargo.toml");
+
     let metadata = manifest
         .split("[package.metadata.uds]")
         .nth(1)

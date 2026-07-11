@@ -1,10 +1,16 @@
+//! HTTP routing, middleware, and endpoint handlers for the three UDS APIs.
+//!
+//! Public, administrative, and fleet traffic use separate routers so a
+//! deployment cannot accidentally expose privileged handlers on the public
+//! listener.
+
+mod routers;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::{Body, HttpBody};
-use axum::extract::{
-    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Multipart, Path, Query, State,
-};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Multipart, Path, Query, State};
 use axum::http::{HeaderValue, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -24,128 +30,73 @@ use crate::config::LogLevel;
 use crate::config::ServerConfig;
 use crate::errors::{ErrorResponseMetadata, Result, UdsError};
 use crate::logging::{
-    LogEventKind, LoggingRuntime, RequestMetadata, events_to_ndjson, read_recent_events,
-    stream_events,
+    LogEventKind, LoggingRuntime, RequestMetadata, events_to_ndjson, read_recent_events, stream_events,
 };
 use crate::models::{
-    CatalogResponse, ChangelogPatchRequest, CopyReleaseRequest, MutationResponse,
-    ReleaseUploadMetadata, ReplicationEvent, ReplicationEventType, UploadPolicy,
+    CatalogResponse, ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseUploadMetadata,
+    ReplicationEvent, ReplicationEventType, UploadPolicy,
 };
 use crate::security::{AdminAuth, ClusterAuth, OwnerAuth};
 use crate::shutdown::{ShutdownState, TransferKind};
 use crate::stats::{ChannelStats, StatsEvent, StatsEventKind, StatsRecorder};
 use crate::storage::{StagedArtifact, Storage};
 
+pub use routers::{build_admin_router, build_fleet_router, build_public_router};
+
 #[derive(Clone)]
+/// Shared services required by UDS request handlers.
+///
+/// Axum clones this lightweight container for requests while the underlying
+/// state remains shared through reference-counted services.
 pub struct AppState {
+    /// The config carried by this UDS data contract.
     pub config: Arc<ServerConfig>,
+
+    /// The storage carried by this UDS data contract.
     pub storage: Arc<Storage>,
+
+    /// The stats carried by this UDS data contract.
     pub stats: Arc<StatsRecorder>,
+
+    /// The cluster carried by this UDS data contract.
     pub cluster: ClusterState,
+
+    /// The logging carried by this UDS data contract.
     pub logging: Arc<LoggingRuntime>,
+
+    /// The shutdown carried by this UDS data contract.
     pub shutdown: Arc<ShutdownState>,
+
+    /// The auth carried by this UDS data contract.
     pub auth: Arc<AdminTokenStore>,
 }
 
-pub fn build_public_router(state: AppState) -> Router {
-    apply_common_layers(
-        Router::new()
-            .route("/health", get(health))
-            .route(
-                "/api/v1/updates/{channel}/{target}/{arch}/{current_version}",
-                get(check_update),
-            )
-            .route(
-                "/api/v1/downloads/{channel}/{version}/{platform}/{file_name}",
-                get(download_artifact),
-            ),
-        state,
-    )
-}
-
-pub fn build_admin_router(state: AppState) -> Router {
-    let upload_policy = state
-        .config
-        .upload
-        .policy()
-        .expect("validated upload policy");
-    let upload_body_limit = upload_policy
-        .max_total_artifact_bytes
-        .saturating_add(upload_policy.max_metadata_bytes)
-        .saturating_add(1024 * 1024)
-        .min(usize::MAX as u64) as usize;
-    let mut router = Router::new()
-        .route("/health", get(health))
-        .route(
-            "/admin/v1/channels/{channel}/releases",
-            get(list_releases)
-                .post(upload_release)
-                .layer(DefaultBodyLimit::max(upload_body_limit)),
-        )
-        .route("/admin/v1/upload-policy", get(get_upload_policy))
-        .route(
-            "/admin/v1/channels/{channel}/releases/{version}/changelog",
-            patch(patch_changelog),
-        )
-        .route(
-            "/admin/v1/channels/{channel}/releases/{version}",
-            delete(withdraw_release),
-        )
-        .route(
-            "/admin/v1/channels/{target_channel}/copy",
-            post(copy_release),
-        )
-        .route("/admin/v1/channels/{channel}/stats", get(channel_stats));
-    router = router
-        .route(
-            "/admin/v1/admin-tokens",
-            get(list_admin_tokens).post(create_admin_token),
-        )
-        .route("/admin/v1/admin-tokens/{id}", patch(set_admin_token_status));
-
-    if state.config.logging.admin_api.enabled && state.config.logging.file.enabled {
-        router = router
-            .route("/admin/v1/logs/recent", get(recent_logs))
-            .route("/admin/v1/logs/stream", get(stream_logs));
-    }
-
-    apply_common_layers(
-        router.layer(middleware::from_fn(no_store_token_responses)),
-        state,
-    )
-}
-
-pub fn build_fleet_router(state: AppState) -> Router {
-    apply_common_layers(
-        Router::new()
-            .route("/health", get(health))
-            .route("/fleet/v1/replication/events", post(replication_event))
-            .route(
-                "/fleet/v1/auth/admin-tokens",
-                get(fleet_admin_tokens).post(merge_fleet_admin_tokens),
-            )
-            .route("/fleet/v1/catalog", get(catalog))
-            .route("/fleet/v1/stats/local/{channel}", get(local_stats)),
-        state,
-    )
-}
-
 #[derive(serde::Deserialize)]
+/// Owner-authorized input for creating one purpose-bound admin token.
 struct CreateAdminTokenRequest {
+    /// Stores the name value used by this UDS component.
     name: String,
+
+    /// Stores the reason value used by this UDS component.
     reason: String,
 }
 
 #[derive(serde::Deserialize)]
+/// Owner-authorized input for changing an admin token's enabled state.
 struct SetAdminTokenStatusRequest {
+    /// Stores the enabled value used by this UDS component.
     enabled: bool,
+
+    /// Stores the reason value used by this UDS component.
     reason: String,
 }
 
+/// Performs the list admin tokens operation required by UDS.
 async fn list_admin_tokens(State(state): State<AppState>, _auth: OwnerAuth) -> Result<Response> {
     no_store(Json(state.auth.list().await).into_response())
 }
 
+/// Performs the create admin token operation required by UDS.
 async fn create_admin_token(
     State(state): State<AppState>,
     _auth: OwnerAuth,
@@ -153,6 +104,9 @@ async fn create_admin_token(
     Json(request): Json<CreateAdminTokenRequest>,
 ) -> Result<Response> {
     let (metadata, mut token) = state.auth.create(request.name, request.reason).await?;
+
+    // Do not reveal a newly created credential unless every known peer has the
+    // verifier required to authenticate it consistently.
     if !state
         .cluster
         .replicate_auth_snapshot(&state.auth.fleet_snapshot().await)
@@ -171,6 +125,7 @@ async fn create_admin_token(
     no_store(Json(CreatedAdminToken { metadata, token }).into_response())
 }
 
+/// Performs the set admin token status operation required by UDS.
 async fn set_admin_token_status(
     State(state): State<AppState>,
     _auth: OwnerAuth,
@@ -200,6 +155,7 @@ async fn set_admin_token_status(
     no_store(Json(metadata).into_response())
 }
 
+/// Performs the no store operation required by UDS.
 fn no_store(mut response: Response) -> Result<Response> {
     response
         .headers_mut()
@@ -207,6 +163,7 @@ fn no_store(mut response: Response) -> Result<Response> {
     Ok(response)
 }
 
+/// Performs the no store token responses operation required by UDS.
 async fn no_store_token_responses(request: Request<Body>, next: Next) -> Response {
     let token_management = request.uri().path().starts_with("/admin/v1/admin-tokens");
     let mut response = next.run(request).await;
@@ -218,6 +175,7 @@ async fn no_store_token_responses(request: Request<Body>, next: Next) -> Respons
     response
 }
 
+/// Performs the emit token audit operation required by UDS.
 fn emit_token_audit(
     state: &AppState,
     request: &RequestMetadata,
@@ -251,6 +209,7 @@ fn emit_token_audit(
     state.logging.emit(&event);
 }
 
+/// Performs the apply common layers operation required by UDS.
 fn apply_common_layers(router: Router<AppState>, state: AppState) -> Router {
     router
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(|_| {
@@ -267,11 +226,8 @@ fn apply_common_layers(router: Router<AppState>, state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn reject_during_shutdown(
-    State(state): State<AppState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+/// Performs the reject during shutdown operation required by UDS.
+async fn reject_during_shutdown(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
     if !state.shutdown.is_draining() {
         return next.run(request).await;
     }
@@ -292,11 +248,12 @@ async fn reject_during_shutdown(
     response
 }
 
-async fn request_logging(
-    State(state): State<AppState>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response {
+/// Performs the request logging operation required by UDS.
+async fn request_logging(State(state): State<AppState>, mut request: Request<Body>, next: Next) -> Response {
+    //
+    // Attach one request ID and an actor slot before authentication extractors
+    // and handlers run, allowing every later event to share the same context.
+    //
     let request_id = request
         .headers()
         .get("x-request-id")
@@ -413,11 +370,13 @@ async fn request_logging(
     response
 }
 
+/// Performs the health operation required by UDS.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let _ = state;
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// Performs the check update operation required by UDS.
 async fn check_update(
     State(state): State<AppState>,
     Path((channel, target, arch, current_version)): Path<(String, String, String, String)>,
@@ -442,6 +401,7 @@ async fn check_update(
     }
 }
 
+/// Performs the download artifact operation required by UDS.
 async fn download_artifact(
     State(state): State<AppState>,
     Extension(request): Extension<RequestMetadata>,
@@ -463,10 +423,9 @@ async fn download_artifact(
         serde_json::Value::from(file_name.clone()),
     );
     transfer_fields.insert("size".into(), serde_json::Value::from(artifact_size));
-    let transfer =
-        state
-            .shutdown
-            .start_transfer(TransferKind::Download, request.request_id, transfer_fields);
+    let transfer = state
+        .shutdown
+        .start_transfer(TransferKind::Download, request.request_id, transfer_fields);
     let (target, arch) = platform
         .split_once('-')
         .map(|(target, arch)| (Some(target.to_string()), Some(arch.to_string())))
@@ -513,6 +472,7 @@ async fn download_artifact(
     Ok(response)
 }
 
+/// Performs the upload release operation required by UDS.
 async fn upload_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -529,8 +489,7 @@ async fn upload_release(
         request.request_id.clone(),
         transfer_fields,
     );
-    let upload =
-        read_release_multipart(multipart, state.storage.upload_staging_root(), &policy).await?;
+    let upload = read_release_multipart(multipart, state.storage.upload_staging_root(), &policy).await?;
     transfer.set_field("version", upload.metadata.version.clone());
     let manifest = state
         .storage
@@ -585,13 +544,12 @@ async fn upload_release(
     }))
 }
 
-async fn get_upload_policy(
-    State(state): State<AppState>,
-    _auth: AdminAuth,
-) -> Result<Json<UploadPolicy>> {
+/// Performs the get upload policy operation required by UDS.
+async fn get_upload_policy(State(state): State<AppState>, _auth: AdminAuth) -> Result<Json<UploadPolicy>> {
     Ok(Json(state.config.upload.policy()?))
 }
 
+/// Performs the list releases operation required by UDS.
 async fn list_releases(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -601,6 +559,7 @@ async fn list_releases(
     Ok(Json(state.storage.release_list(&channel).await?))
 }
 
+/// Performs the patch changelog operation required by UDS.
 async fn patch_changelog(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -637,6 +596,7 @@ async fn patch_changelog(
     }))
 }
 
+/// Performs the withdraw release operation required by UDS.
 async fn withdraw_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -669,6 +629,7 @@ async fn withdraw_release(
     }))
 }
 
+/// Performs the copy release operation required by UDS.
 async fn copy_release(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -706,6 +667,7 @@ async fn copy_release(
     }))
 }
 
+/// Performs the channel stats operation required by UDS.
 async fn channel_stats(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -716,10 +678,13 @@ async fn channel_stats(
 }
 
 #[derive(Debug, serde::Deserialize)]
+/// Optional filters accepted by the administrative log endpoints.
 struct LogQuery {
+    /// Stores the lines value used by this UDS component.
     lines: Option<usize>,
 }
 
+/// Performs the recent logs operation required by UDS.
 async fn recent_logs(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -743,6 +708,7 @@ async fn recent_logs(
         .into_response())
 }
 
+/// Performs the stream logs operation required by UDS.
 async fn stream_logs(
     State(state): State<AppState>,
     _auth: AdminAuth,
@@ -769,6 +735,7 @@ async fn stream_logs(
         .into_response())
 }
 
+/// Performs the emit audit operation required by UDS.
 fn emit_audit(
     state: &AppState,
     request: &RequestMetadata,
@@ -795,13 +762,12 @@ fn emit_audit(
     state.logging.emit(&event);
 }
 
-async fn catalog(
-    State(state): State<AppState>,
-    _auth: ClusterAuth,
-) -> Result<Json<CatalogResponse>> {
+/// Performs the catalog operation required by UDS.
+async fn catalog(State(state): State<AppState>, _auth: ClusterAuth) -> Result<Json<CatalogResponse>> {
     Ok(Json(state.storage.catalog().await?))
 }
 
+/// Performs the local stats operation required by UDS.
 async fn local_stats(
     State(state): State<AppState>,
     _auth: ClusterAuth,
@@ -811,10 +777,12 @@ async fn local_stats(
     Ok(Json(state.stats.channel_stats(&channel).await?))
 }
 
+/// Performs the replication event operation required by UDS.
 async fn replication_event(_auth: ClusterAuth, Json(_event): Json<ReplicationEvent>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
+/// Performs the fleet admin tokens operation required by UDS.
 async fn fleet_admin_tokens(
     State(state): State<AppState>,
     _auth: ClusterAuth,
@@ -822,6 +790,7 @@ async fn fleet_admin_tokens(
     Json(state.auth.fleet_snapshot().await)
 }
 
+/// Performs the merge fleet admin tokens operation required by UDS.
 async fn merge_fleet_admin_tokens(
     State(state): State<AppState>,
     _auth: ClusterAuth,
@@ -831,17 +800,28 @@ async fn merge_fleet_admin_tokens(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Fully streamed multipart upload ready for semantic validation and publishing.
 struct StagedMultipart {
+    /// Stores the temp dir value used by this UDS component.
     _temp_dir: tempfile::TempDir,
+
+    /// Stores the metadata value used by this UDS component.
     metadata: ReleaseUploadMetadata,
+
+    /// Stores the files value used by this UDS component.
     files: BTreeMap<String, StagedArtifact>,
 }
 
+/// Performs the read release multipart operation required by UDS.
 async fn read_release_multipart(
     mut multipart: Multipart,
     staging_root: std::path::PathBuf,
     policy: &UploadPolicy,
 ) -> Result<StagedMultipart> {
+    //
+    // Stream multipart fields to a temporary directory while enforcing limits.
+    // No artifact is published until metadata and all digests are validated.
+    //
     std::fs::create_dir_all(&staging_root)?;
     let temp_dir = tempfile::Builder::new()
         .prefix("upload-")
@@ -851,9 +831,10 @@ async fn read_release_multipart(
     let mut total_artifact_bytes = 0u64;
 
     while let Some(mut field) = multipart.next_field().await.map_err(map_multipart_error)? {
-        let name = field.name().map(str::to_string).ok_or_else(|| {
-            UdsError::BadRequest("all multipart fields must have a name".to_string())
-        })?;
+        let name = field
+            .name()
+            .map(str::to_string)
+            .ok_or_else(|| UdsError::BadRequest("all multipart fields must have a name".to_string()))?;
 
         if name == "metadata" {
             if metadata.is_some() {
@@ -871,9 +852,8 @@ async fn read_release_multipart(
                 bytes.extend_from_slice(&chunk);
             }
             metadata = Some(
-                serde_json::from_slice::<ReleaseUploadMetadata>(&bytes).map_err(|error| {
-                    UdsError::BadRequest(format!("invalid release metadata: {error}"))
-                })?,
+                serde_json::from_slice::<ReleaseUploadMetadata>(&bytes)
+                    .map_err(|error| UdsError::BadRequest(format!("invalid release metadata: {error}")))?,
             );
         } else {
             if files.contains_key(&name) {
@@ -920,9 +900,8 @@ async fn read_release_multipart(
         }
     }
 
-    let metadata = metadata.ok_or_else(|| {
-        UdsError::BadRequest("multipart field 'metadata' is required".to_string())
-    })?;
+    let metadata =
+        metadata.ok_or_else(|| UdsError::BadRequest("multipart field 'metadata' is required".to_string()))?;
     Ok(StagedMultipart {
         _temp_dir: temp_dir,
         metadata,
@@ -930,6 +909,7 @@ async fn read_release_multipart(
     })
 }
 
+/// Performs the map multipart error operation required by UDS.
 fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> UdsError {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         UdsError::PayloadTooLarge("multipart request exceeds the configured limit".to_string())
@@ -938,6 +918,7 @@ fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> UdsEr
     }
 }
 
+/// Performs the require allowed channel operation required by UDS.
 fn require_allowed_channel(state: &AppState, channel: &str) -> Result<()> {
     if state.config.channel_is_allowed(channel) {
         Ok(())
@@ -948,11 +929,8 @@ fn require_allowed_channel(state: &AppState, channel: &str) -> Result<()> {
     }
 }
 
-fn replication_event_model(
-    channel: &str,
-    version: &str,
-    event_type: ReplicationEventType,
-) -> ReplicationEvent {
+/// Performs the replication event model operation required by UDS.
+fn replication_event_model(channel: &str, version: &str, event_type: ReplicationEventType) -> ReplicationEvent {
     ReplicationEvent {
         event_id: Uuid::new_v4().to_string(),
         event_type,
@@ -1054,6 +1032,7 @@ mod tests {
             .unwrap()
     }
 
+    /// Verifies that upload streams into blob storage and download counts on eof.
     #[tokio::test]
     async fn upload_streams_into_blob_storage_and_download_counts_on_eof() {
         let (public, admin, stats, shutdown, _temp, _state) = test_app().await;
@@ -1080,6 +1059,7 @@ mod tests {
         assert_eq!(stats.channel_stats("stable").await.unwrap().downloads, 1);
     }
 
+    /// Verifies that aborted download is untracked without recording stats.
     #[tokio::test]
     async fn aborted_download_is_untracked_without_recording_stats() {
         let (public, admin, stats, shutdown, _temp, _state) = test_app().await;
@@ -1102,6 +1082,7 @@ mod tests {
         assert_eq!(stats.channel_stats("stable").await.unwrap().downloads, 0);
     }
 
+    /// Verifies that upload rejects artifact above policy limit.
     #[tokio::test]
     async fn upload_rejects_artifact_above_policy_limit() {
         let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
@@ -1110,6 +1091,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    /// Verifies that upload policy requires admin authentication.
     #[tokio::test]
     async fn upload_policy_requires_admin_authentication() {
         let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
@@ -1124,6 +1106,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// Verifies that owner manages tokens and admin cannot use owner api.
     #[tokio::test]
     async fn owner_manages_tokens_and_admin_cannot_use_owner_api() {
         let (_public, admin, _stats, _shutdown, _temp, _state) = test_app().await;
@@ -1179,6 +1162,7 @@ mod tests {
         assert_eq!(normal.status(), StatusCode::OK);
     }
 
+    /// Verifies that health returns service unavailable while draining.
     #[tokio::test]
     async fn health_returns_service_unavailable_while_draining() {
         let (public, _admin, _stats, shutdown, _temp, _state) = test_app().await;
@@ -1202,6 +1186,7 @@ mod tests {
         );
     }
 
+    /// Verifies that listeners expose only their own routes and no internal aliases.
     #[tokio::test]
     async fn listeners_expose_only_their_own_routes_and_no_internal_aliases() {
         let (_public, _admin, _stats, _shutdown, _temp, state) = test_app().await;

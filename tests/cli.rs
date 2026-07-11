@@ -1,5 +1,8 @@
+//! Integration tests for the user-visible UDS command-line interface.
+
 use std::process::Command;
 
+/// Verifies that bare uds prints help and exits successfully.
 #[test]
 fn bare_uds_prints_help_and_exits_successfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_uds")).output().unwrap();
@@ -14,6 +17,7 @@ fn bare_uds_prints_help_and_exits_successfully() {
     assert!(!stdout.contains("MindWork AI Studio Update Delivery System"));
 }
 
+/// Verifies that version command prints formatted version.
 #[test]
 fn version_command_prints_formatted_version() {
     let output = Command::new(env!("CARGO_BIN_EXE_uds"))
@@ -27,6 +31,7 @@ fn version_command_prints_formatted_version() {
     );
 }
 
+/// Verifies that version flag includes build.
 #[test]
 fn version_flag_includes_build() {
     let output = Command::new(env!("CARGO_BIN_EXE_uds"))
@@ -40,6 +45,7 @@ fn version_flag_includes_build() {
     );
 }
 
+/// Verifies that non tty changelog prints only latest section.
 #[test]
 fn non_tty_changelog_prints_only_latest_section() {
     let output = Command::new(env!("CARGO_BIN_EXE_uds"))

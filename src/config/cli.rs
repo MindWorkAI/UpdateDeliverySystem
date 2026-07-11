@@ -23,10 +23,13 @@ pub struct Cli {
 pub enum CliCommand {
     /// Show UDS version and build information.
     Version,
+
     /// Browse the embedded UDS changelog.
     Changelog,
+
     /// Run the UDS update delivery server.
     Server(ServerArgs),
+
     /// Run the interactive UDS administration client.
     Client {
         /// Optional client operation; omitting it starts the guided client flow.
@@ -41,9 +44,11 @@ pub struct ServerArgs {
     /// Path to a TOML configuration file.
     #[arg(long)]
     pub config: Option<PathBuf>,
+
     /// Force single-node mode and disable peer discovery and replication.
     #[arg(long)]
     pub single_node_mode: bool,
+
     /// Optional server maintenance operation.
     #[command(subcommand)]
     pub command: Option<ServerCommand>,
@@ -69,33 +74,43 @@ pub struct ConfigureServerArgs {
 pub enum ClientCommand {
     /// Create or update the local client configuration.
     Configure,
+
     /// Upload a release to UDS.
     Upload,
+
     /// Withdraw a release from a channel.
     Withdraw,
+
     /// Copy a release from one channel to another.
     Copy,
+
     /// Update the changelog for an existing release.
     Changelog,
+
     /// Show channel statistics.
     Stats,
+
     /// Manage personal admin tokens using the break-glass owner token.
     Tokens {
         /// Token operation to execute.
         #[command(subcommand)]
         command: TokenCommand,
     },
+
     /// Show UDS service logs.
     Logs {
         /// Follow appended log events.
         #[arg(long)]
         follow: bool,
+
         /// Number of recent log lines to show first.
         #[arg(long, default_value_t = 200)]
         lines: usize,
+
         /// Minimum level to display locally.
         #[arg(long)]
         level: Option<LogLevel>,
+
         /// Disable local terminal colors.
         #[arg(long)]
         no_color: bool,
@@ -107,10 +122,19 @@ pub enum ClientCommand {
 pub enum TokenCommand {
     /// List token metadata and immutable status history.
     List,
+
     /// Create a personal or purpose-bound admin token.
     Create,
+
     /// Enable an admin token.
-    Enable { id: uuid::Uuid },
+    Enable {
+        /// Stable identifier of the administrator token to reactivate.
+        id: uuid::Uuid,
+    },
+
     /// Disable an admin token.
-    Disable { id: uuid::Uuid },
+    Disable {
+        /// Stable identifier of the administrator token to deactivate.
+        id: uuid::Uuid,
+    },
 }

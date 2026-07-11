@@ -21,10 +21,14 @@ use crate::build_info;
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Parsed changelog section for one released UDS version.
 pub struct Section<'a> {
+    /// The version carried by this UDS data contract.
     pub version: Version,
+
+    /// The markdown carried by this UDS data contract.
     pub markdown: &'a str,
 }
 
+/// Provides the parse operation used by UDS callers.
 pub fn parse<'a>(source: &'a str, expected: &str) -> anyhow::Result<Vec<Section<'a>>> {
     let mut starts = Vec::new();
     for (offset, line) in line_offsets(source) {
@@ -62,6 +66,7 @@ pub fn parse<'a>(source: &'a str, expected: &str) -> anyhow::Result<Vec<Section<
         .collect())
 }
 
+/// Performs the line offsets operation required by UDS.
 fn line_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut offset = 0;
     source.split_inclusive('\n').map(move |line| {
@@ -71,6 +76,7 @@ fn line_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+/// Runs the run workflow for UDS.
 pub fn run() -> anyhow::Result<()> {
     let sections = parse(build_info::CHANGELOG, build_info::VERSION)?;
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
@@ -83,19 +89,27 @@ pub fn run() -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 /// Scroll and selection state for the interactive changelog viewer.
 struct ViewerState {
+    /// Stores the section value used by this UDS component.
     section: usize,
+
+    /// Stores the scroll value used by this UDS component.
     scroll: usize,
 }
 
 impl ViewerState {
+    /// Performs the older operation required by UDS.
     fn older(&mut self, count: usize) {
         self.section = (self.section + 1).min(count.saturating_sub(1));
         self.scroll = 0;
     }
+
+    /// Performs the newer operation required by UDS.
     fn newer(&mut self) {
         self.section = self.section.saturating_sub(1);
         self.scroll = 0;
     }
+
+    /// Performs the scroll by operation required by UDS.
     fn scroll_by(&mut self, delta: isize, max: usize) {
         self.scroll = self.scroll.saturating_add_signed(delta).min(max);
     }
@@ -105,6 +119,7 @@ impl ViewerState {
 struct ViewerTerminal;
 
 impl ViewerTerminal {
+    /// Performs the enter operation required by UDS.
     fn enter() -> anyhow::Result<Self> {
         terminal::enable_raw_mode()?;
         if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
@@ -114,6 +129,7 @@ impl ViewerTerminal {
         Ok(Self)
     }
 
+    /// Performs the run operation required by UDS.
     fn run(self, sections: &[Section<'_>]) -> anyhow::Result<()> {
         let mut state = ViewerState::default();
         loop {
@@ -154,6 +170,7 @@ impl Drop for ViewerTerminal {
     }
 }
 
+/// Performs the wrapped lines operation required by UDS.
 fn wrapped_lines(markdown: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut output = Vec::new();
@@ -179,6 +196,7 @@ fn wrapped_lines(markdown: &str, width: usize) -> Vec<String> {
     output
 }
 
+/// Performs the draw operation required by UDS.
 fn draw(state: &ViewerState, sections: &[Section<'_>], lines: &[String], width: u16, height: u16) -> io::Result<()> {
     let mut stdout = io::stdout();
     queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
@@ -214,6 +232,7 @@ fn draw(state: &ViewerState, sections: &[Section<'_>], lines: &[String], width: 
     stdout.flush()
 }
 
+/// Performs the truncate operation required by UDS.
 fn truncate(value: &str, width: usize) -> String {
     value.chars().take(width).collect()
 }
@@ -224,6 +243,7 @@ mod tests {
 
     const VALID: &str = "# UDS v2.0.0\n\n## Added\n\nNew.\n# UDS v1.0.0\n\nOld.\n";
 
+    /// Verifies that parses versions and keeps subheadings and blank lines.
     #[test]
     fn parses_versions_and_keeps_subheadings_and_blank_lines() {
         let sections = parse(VALID, "2.0.0").unwrap();
@@ -231,6 +251,7 @@ mod tests {
         assert!(sections[0].markdown.contains("## Added\n\nNew."));
     }
 
+    /// Verifies that rejects bad headings duplicates order and version mismatch.
     #[test]
     fn rejects_bad_headings_duplicates_order_and_version_mismatch() {
         assert!(parse("# Wrong\n", "1.0.0").is_err());
@@ -239,6 +260,7 @@ mod tests {
         assert!(parse(VALID, "3.0.0").is_err());
     }
 
+    /// Verifies that navigation and scroll stay in bounds.
     #[test]
     fn navigation_and_scroll_stay_in_bounds() {
         let mut state = ViewerState::default();
@@ -256,6 +278,7 @@ mod tests {
         assert_eq!((state.section, state.scroll), (0, 0));
     }
 
+    /// Verifies that wrapping handles tiny terminals.
     #[test]
     fn wrapping_handles_tiny_terminals() {
         assert_eq!(wrapped_lines("abc", 1), ["a", "b", "c"]);

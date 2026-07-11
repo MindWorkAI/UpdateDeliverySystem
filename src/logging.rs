@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::config::{ClientIpLoggingMode, LogLevel, LoggingColorMode, ServerConfig};
 use crate::errors::{Result, UdsError};
 
+/// Defines the NOISY TARGETS value used by UDS.
 const NOISY_TARGETS: &[&str] = &[
     "h2",
     "hyper",
@@ -43,7 +44,11 @@ const NOISY_TARGETS: &[&str] = &[
     "tokio_rustls",
     "reqwest",
 ];
+
+/// Defines the MAX RECENT EVENTS value used by UDS.
 const MAX_RECENT_EVENTS: usize = 10_000;
+
+/// Defines the EVENT TIMESTAMP value used by UDS.
 const EVENT_TIMESTAMP: &[time::format_description::FormatItem<'_>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
@@ -51,9 +56,16 @@ const EVENT_TIMESTAMP: &[time::format_description::FormatItem<'_>] =
 #[serde(rename_all = "lowercase")]
 /// Semantic category used to distinguish operational and audit log events.
 pub enum LogEventKind {
+    /// Represents the item case in UDS.
     System,
+
+    /// Represents the item case in UDS.
     Http,
+
+    /// Represents the item case in UDS.
     Audit,
+
+    /// Represents the item case in UDS.
     Security,
 }
 
@@ -61,45 +73,88 @@ pub enum LogEventKind {
 #[serde(rename_all = "lowercase")]
 /// Describes which network layer supplied the recorded client IP address.
 pub enum ClientIpSource {
+    /// Represents the item case in UDS.
     Socket,
+
+    /// Represents the item case in UDS.
     Disabled,
+
+    /// Represents the item case in UDS.
     Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 /// Stable structured representation of one UDS log event.
 pub struct LogEventLine {
+    /// The schema version carried by this UDS data contract.
     pub schema_version: u8,
+
+    /// The event id carried by this UDS data contract.
     pub event_id: Uuid,
+
+    /// The timestamp carried by this UDS data contract.
     pub timestamp: String,
+
+    /// The level carried by this UDS data contract.
     pub level: LogLevel,
+
+    /// The kind carried by this UDS data contract.
     pub kind: LogEventKind,
+
+    /// The target carried by this UDS data contract.
     pub target: String,
+
+    /// The request id carried by this UDS data contract.
     pub request_id: Option<String>,
+
+    /// The client ip carried by this UDS data contract.
     pub client_ip: Option<IpAddr>,
+
+    /// The client ip source carried by this UDS data contract.
     pub client_ip_source: ClientIpSource,
+
+    /// The fields carried by this UDS data contract.
     pub fields: BTreeMap<String, Value>,
+
+    /// The message carried by this UDS data contract.
     pub message: String,
 }
 
 #[derive(Debug, Clone)]
 /// Request correlation and network metadata attached by HTTP middleware.
 pub struct RequestMetadata {
+    /// The request id carried by this UDS data contract.
     pub request_id: String,
+
+    /// The socket ip carried by this UDS data contract.
     pub socket_ip: Option<IpAddr>,
+
+    /// The method carried by this UDS data contract.
     pub method: String,
+
+    /// The route carried by this UDS data contract.
     pub route: Option<String>,
+
+    /// The actor carried by this UDS data contract.
     pub actor: std::sync::Arc<std::sync::Mutex<Option<crate::auth::ActorIdentity>>>,
 }
 
 /// Logging services shared by request handlers and lifecycle code.
 pub struct LoggingRuntime {
+    /// Stores the active file path value used by this UDS component.
     active_file_path: Option<PathBuf>,
+
+    /// Stores the sender value used by this UDS component.
     sender: broadcast::Sender<LogEventLine>,
+
+    /// Stores the client ip mode value used by this UDS component.
     client_ip_mode: ClientIpLoggingMode,
+
+    /// Stores the file log handle value used by this UDS component.
     _file_log_handle: Option<FileLogWriterHandle>,
 }
 
+/// Provides the init server logging operation used by UDS callers.
 pub fn init_server_logging(config: &ServerConfig) -> Result<LoggingRuntime> {
     let filter = build_env_filter(&config.logging.level, &config.logging.filter)?;
     let color = match config.logging.console.color {
@@ -152,6 +207,7 @@ pub fn init_server_logging(config: &ServerConfig) -> Result<LoggingRuntime> {
     })
 }
 
+/// Provides the init client logging operation used by UDS callers.
 pub fn init_client_logging() -> Result<()> {
     // Use a conservative default for client commands unless the operator
     // explicitly requests another filter through the environment.
@@ -174,12 +230,17 @@ pub fn init_client_logging() -> Result<()> {
 }
 
 impl LoggingRuntime {
+    /// Provides the active file path operation used by UDS callers.
     pub fn active_file_path(&self) -> Option<&Path> {
         self.active_file_path.as_deref()
     }
+
+    /// Provides the subscribe operation used by UDS callers.
     pub fn subscribe(&self) -> broadcast::Receiver<LogEventLine> {
         self.sender.subscribe()
     }
+
+    /// Provides the event operation used by UDS callers.
     pub fn event(
         &self,
         level: LogLevel,
@@ -199,6 +260,8 @@ impl LoggingRuntime {
             message,
         )
     }
+
+    /// Provides the emit operation used by UDS callers.
     pub fn emit(&self, event: &LogEventLine) {
         if let Ok(json) = serde_json::to_string(event) {
             match event.level {
@@ -210,6 +273,7 @@ impl LoggingRuntime {
             }
         }
     }
+
     #[cfg(test)]
     pub(crate) fn disabled() -> Self {
         let (sender, _) = broadcast::channel(16);
@@ -222,6 +286,7 @@ impl LoggingRuntime {
     }
 }
 
+/// Creates the build event state required by UDS.
 pub fn build_event(
     mode: ClientIpLoggingMode,
     level: LogLevel,
@@ -263,6 +328,7 @@ pub fn build_event(
     }
 }
 
+/// Provides the effective log file path operation used by UDS callers.
 pub fn effective_log_file_path(config: &ServerConfig) -> Option<PathBuf> {
     config.logging.file.enabled.then(|| {
         config
@@ -274,6 +340,7 @@ pub fn effective_log_file_path(config: &ServerConfig) -> Option<PathBuf> {
     })
 }
 
+/// Performs the build file log writer operation required by UDS.
 fn build_file_log_writer(
     base_path: &Path,
     max_size_mb: u64,
@@ -295,6 +362,7 @@ fn build_file_log_writer(
     Ok((writer, handle, active))
 }
 
+/// Creates the build env filter state required by UDS.
 pub fn build_env_filter(level: &str, configured: &str) -> Result<EnvFilter> {
     if let Ok(filter) = std::env::var("RUST_LOG") {
         return EnvFilter::try_new(filter).map_err(|e| UdsError::Config(format!("invalid RUST_LOG filter: {e}")));
@@ -313,8 +381,13 @@ pub fn build_env_filter(level: &str, configured: &str) -> Result<EnvFilter> {
 #[derive(Default)]
 /// Tracing visitor that converts typed event fields into JSON values.
 struct EventVisitor {
+    /// Stores the message value used by this UDS component.
     message: String,
+
+    /// Stores the event json value used by this UDS component.
     event_json: Option<String>,
+
+    /// Stores the fields value used by this UDS component.
     fields: BTreeMap<String, Value>,
 }
 impl Visit for EventVisitor {
@@ -335,6 +408,7 @@ impl Visit for EventVisitor {
     }
 }
 impl EventVisitor {
+    /// Performs the value operation required by UDS.
     fn value(&mut self, f: &Field, v: Value) {
         match f.name() {
             "message" => self.message = v.as_str().unwrap_or_default().into(),
@@ -362,6 +436,7 @@ impl<'w> FormatFields<'w> for UdsFieldFormatter {
 #[derive(Clone)]
 /// Tracing formatter that persists one JSON object per line.
 struct NdjsonFormatter {
+    /// Stores the sender value used by this UDS component.
     sender: broadcast::Sender<LogEventLine>,
 }
 impl<S, N> FormatEvent<S, N> for NdjsonFormatter
@@ -399,6 +474,7 @@ where
 #[derive(Clone, Copy)]
 /// Tracing formatter optimized for readable interactive terminal output.
 struct HumanFormatter {
+    /// Stores the color value used by this UDS component.
     color: bool,
 }
 impl<S, N> FormatEvent<S, N> for HumanFormatter
@@ -431,6 +507,7 @@ where
     }
 }
 
+/// Performs the level operation required by UDS.
 fn level(level: &Level) -> LogLevel {
     match *level {
         Level::TRACE => LogLevel::Trace,
@@ -440,10 +517,13 @@ fn level(level: &Level) -> LogLevel {
         Level::ERROR => LogLevel::Error,
     }
 }
+
+/// Performs the sanitize operation required by UDS.
 fn sanitize(value: &str) -> String {
     value.chars().flat_map(|c| c.escape_default()).collect()
 }
 
+/// Retrieves the read recent events information required by the caller.
 pub async fn read_recent_events(path: &Path, lines: usize) -> Result<Vec<LogEventLine>> {
     let limit = lines.min(MAX_RECENT_EVENTS);
     if limit == 0 {
@@ -463,6 +543,7 @@ pub async fn read_recent_events(path: &Path, lines: usize) -> Result<Vec<LogEven
     Ok(result)
 }
 
+/// Performs the rotated paths operation required by UDS.
 async fn rotated_paths(active: &Path) -> Vec<PathBuf> {
     let Some(dir) = active.parent() else {
         return vec![];
@@ -490,6 +571,7 @@ async fn rotated_paths(active: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Performs the read file backwards operation required by UDS.
 async fn read_file_backwards(path: &Path, limit: usize) -> Result<Vec<LogEventLine>> {
     let Ok(mut file) = fs::File::open(path).await else {
         return Ok(vec![]);
@@ -524,6 +606,7 @@ async fn read_file_backwards(path: &Path, limit: usize) -> Result<Vec<LogEventLi
     Ok(parsed.into_iter().rev().take(limit).rev().collect())
 }
 
+/// Performs the push parsed line operation required by UDS.
 fn push_parsed_line(parsed: &mut Vec<LogEventLine>, line: &str) {
     match serde_json::from_str(line) {
         Ok(event) => parsed.push(event),
@@ -539,9 +622,12 @@ fn push_parsed_line(parsed: &mut Vec<LogEventLine>, line: &str) {
     }
 }
 
+/// Provides the events to ndjson operation used by UDS callers.
 pub fn events_to_ndjson(events: &[LogEventLine]) -> Result<String> {
     Ok(events.iter().map(ndjson_line).collect())
 }
+
+/// Provides the ndjson line operation used by UDS callers.
 pub fn ndjson_line(event: &LogEventLine) -> String {
     format!(
         "{}\n",
@@ -549,6 +635,7 @@ pub fn ndjson_line(event: &LogEventLine) -> String {
     )
 }
 
+/// Provides the stream events operation used by UDS callers.
 pub fn stream_events(
     runtime: std::sync::Arc<LoggingRuntime>,
     lines: usize,
@@ -597,9 +684,12 @@ pub fn stream_events(
     }
 }
 
+/// Returns whether should display level applies to the current UDS state.
 pub fn should_display_level(event: LogLevel, minimum: Option<LogLevel>) -> bool {
     minimum.is_none_or(|m| event >= m)
 }
+
+/// Produces the render log event representation returned or displayed by UDS.
 pub fn render_log_event(event: &LogEventLine, color: bool) -> String {
     let fields = event
         .fields
@@ -622,9 +712,13 @@ pub fn render_log_event(event: &LogEventLine, color: bool) -> String {
     );
     if color { colorize(&line, event.level) } else { line }
 }
+
+/// Provides the color enabled operation used by UDS callers.
 pub fn color_enabled(no_color: bool) -> bool {
     !no_color && io::stdout().is_terminal()
 }
+
+/// Performs the colorize operation required by UDS.
 fn colorize(v: &str, l: LogLevel) -> String {
     let c = match l {
         LogLevel::Error => 196,
@@ -639,6 +733,8 @@ fn colorize(v: &str, l: LogLevel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that ip matrix.
     #[test]
     fn ip_matrix() {
         let r = RequestMetadata {
@@ -665,6 +761,8 @@ mod tests {
             assert_eq!(e.client_ip.is_some(), kind != LogEventKind::Http);
         }
     }
+
+    /// Verifies that typed roundtrip.
     #[test]
     fn typed_roundtrip() {
         let mut f = BTreeMap::new();
@@ -683,6 +781,7 @@ mod tests {
         assert!(!d.message.contains('\n'));
     }
 
+    /// Verifies that human renderer preserves json value types without double escaping.
     #[test]
     fn human_renderer_preserves_json_value_types_without_double_escaping() {
         let mut fields = BTreeMap::new();
@@ -715,6 +814,7 @@ mod tests {
         );
     }
 
+    /// Verifies that human renderer json escapes unsafe string field contents.
     #[test]
     fn human_renderer_json_escapes_unsafe_string_field_contents() {
         let mut fields = BTreeMap::new();

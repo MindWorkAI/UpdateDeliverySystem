@@ -10,6 +10,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use crate::config::{TlsConfig, TlsMode};
 use crate::errors::{Result, UdsError};
 
+/// Runs the serve workflow for UDS.
 pub async fn serve(
     name: &'static str,
     bind: std::net::SocketAddr,

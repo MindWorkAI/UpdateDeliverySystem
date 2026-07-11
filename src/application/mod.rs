@@ -46,6 +46,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+/// Performs the run server operation required by UDS.
 async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     //
     // Initialize every long-lived service before exposing a network listener.
@@ -204,12 +205,14 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Performs the warn insecure listener operation required by UDS.
 fn warn_insecure_listener(name: &str, bind: std::net::SocketAddr, tls: &update_delivery_system::config::TlsConfig) {
     if tls.mode == update_delivery_system::config::TlsMode::Off && !bind.ip().is_loopback() {
         tracing::warn!(listener = name, %bind, "listener is exposed beyond loopback without TLS; tokens will be transmitted unencrypted");
     }
 }
 
+/// Performs the emit shutdown started operation required by UDS.
 fn emit_shutdown_started(logging: &LoggingRuntime, signal: &str, grace_period: Duration, active_transfers: usize) {
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("signal".into(), serde_json::Value::from(signal));
@@ -232,6 +235,7 @@ fn emit_shutdown_started(logging: &LoggingRuntime, signal: &str, grace_period: D
     logging.emit(&event);
 }
 
+/// Performs the emit forced transfers operation required by UDS.
 fn emit_forced_transfers(logging: &LoggingRuntime, transfers: Vec<ActiveTransfer>, reason: &str) {
     for transfer in transfers {
         let mut fields = transfer.fields;
@@ -260,6 +264,7 @@ fn emit_forced_transfers(logging: &LoggingRuntime, transfers: Vec<ActiveTransfer
     }
 }
 
+/// Performs the emit shutdown finished operation required by UDS.
 fn emit_shutdown_finished(
     logging: &LoggingRuntime,
     elapsed: Duration,
@@ -291,6 +296,7 @@ fn emit_shutdown_finished(
     logging.emit(&event);
 }
 
+/// Performs the shutdown signal operation required by UDS.
 #[cfg(unix)]
 async fn shutdown_signal() -> &'static str {
     use tokio::signal::unix::{SignalKind, signal};
@@ -305,6 +311,7 @@ async fn shutdown_signal() -> &'static str {
     }
 }
 
+/// Verifies that shutdown signal.
 #[cfg(not(unix))]
 async fn shutdown_signal() -> &'static str {
     tokio::signal::ctrl_c()

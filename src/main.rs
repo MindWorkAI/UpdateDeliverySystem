@@ -9,6 +9,7 @@ mod application;
 use clap::Parser;
 use update_delivery_system::config::Cli;
 
+/// Verifies that main.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     update_delivery_system::build_info::print_banner_if_interactive()?;

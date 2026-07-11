@@ -1,3 +1,4 @@
+//! Build-time integration that exposes the UDS build number to the executable.
 use std::{env, fs, path::Path};
 
 fn main() {

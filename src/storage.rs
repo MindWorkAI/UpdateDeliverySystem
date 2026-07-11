@@ -27,21 +27,37 @@ use crate::models::{
 #[derive(Debug, Clone)]
 /// Artifact streamed to a temporary file while an upload is being validated.
 pub struct StagedArtifact {
+    /// Multipart field whose contents were written to this staged artifact.
     pub field_name: String,
+
+    /// Temporary file path used until validation and publication complete.
     pub path: PathBuf,
+
+    /// Artifact size in bytes, used to enforce the advertised upload policy.
     pub size: u64,
+
+    /// Lowercase SHA-256 digest used as the immutable blob identifier.
     pub sha256: String,
 }
 
 #[derive(Debug, Clone)]
 /// File-system repository for release metadata and immutable artifact blobs.
 pub struct Storage {
+    /// Root of the durable release, blob, and staging layout.
     data_dir: PathBuf,
+
+    /// External URL used when constructing updater download responses.
     public_base_url: Url,
+
+    /// Serializes manifest mutations and blob pruning within this process.
     mutation_lock: Arc<Mutex<()>>,
 }
 
 impl Storage {
+    /// Opens the storage root and brings its on-disk layout into a usable state.
+    ///
+    /// Startup removes abandoned staging data, rejects incompatible legacy
+    /// layouts, and prunes blobs that no release manifest references.
     pub async fn new(data_dir: PathBuf, public_base_url: String) -> Result<Self> {
         let public_base_url = Url::parse(&public_base_url)
             .map_err(|error| UdsError::Config(format!("public_base_url is not a valid URL: {error}")))?;
@@ -57,14 +73,20 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Returns the root directory that owns all durable UDS storage state.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
 
+    /// Returns the directory in which routes may stream incomplete uploads.
     pub fn upload_staging_root(&self) -> PathBuf {
         self.data_dir.join("staging/uploads")
     }
 
+    /// Publishes a validated release without exposing a partial manifest.
+    ///
+    /// Artifacts enter content-addressed blob storage first. The manifest is
+    /// then written in staging and atomically renamed into the channel.
     pub async fn put_release(
         &self,
         channel: &str,
@@ -139,6 +161,7 @@ impl Storage {
         }
     }
 
+    /// Replaces a release's notes while preserving the remaining manifest.
     pub async fn patch_changelog(&self, channel: &str, version: &str, notes: String) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
         let _guard = self.mutation_lock.lock().await;
@@ -149,6 +172,7 @@ impl Storage {
         Ok(manifest)
     }
 
+    /// Marks a release as withdrawn so update checks stop offering it.
     pub async fn withdraw_release(&self, channel: &str, version: &str) -> Result<ReleaseManifest> {
         let version = normalize_version(version)?;
         let _guard = self.mutation_lock.lock().await;
@@ -159,6 +183,9 @@ impl Storage {
         Ok(manifest)
     }
 
+    /// Copies a verified release manifest into another channel.
+    ///
+    /// Immutable blobs are reused rather than duplicated.
     pub async fn copy_release(
         &self,
         source_channel: &str,
@@ -194,6 +221,10 @@ impl Storage {
         Ok(manifest)
     }
 
+    /// Selects the newest compatible release newer than the client's version.
+    ///
+    /// The response combines changelog notes from all applicable intermediate
+    /// releases so users do not miss changes when skipping versions.
     pub async fn update_for(
         &self,
         channel: &str,
@@ -266,6 +297,7 @@ impl Storage {
         }))
     }
 
+    /// Resolves and verifies the immutable blob requested for a release artifact.
     pub async fn artifact_path(
         &self,
         channel: &str,
@@ -292,6 +324,7 @@ impl Storage {
         Ok((self.blob_data_path(&artifact.sha256), artifact.size))
     }
 
+    /// Returns administrative release summaries for one channel.
     pub async fn release_list(&self, channel: &str) -> Result<ReleaseListResponse> {
         let mut releases = self
             .list_releases(channel)
@@ -309,6 +342,7 @@ impl Storage {
         Ok(ReleaseListResponse { releases })
     }
 
+    /// Builds the digest catalog used to reconcile releases across fleet nodes.
     pub async fn catalog(&self) -> Result<CatalogResponse> {
         let mut entries = Vec::new();
         let mut channels = fs::read_dir(self.data_dir.join("releases")).await?;
@@ -335,6 +369,7 @@ impl Storage {
         Ok(CatalogResponse { entries })
     }
 
+    /// Performs the ensure layout operation required by UDS.
     async fn ensure_layout(&self) -> Result<()> {
         for path in [
             "releases",
@@ -347,6 +382,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the cleanup staging operation required by UDS.
     async fn cleanup_staging(&self) -> Result<()> {
         for path in ["staging/uploads", "staging/releases"] {
             let directory = self.data_dir.join(path);
@@ -358,6 +394,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the ensure no legacy releases operation required by UDS.
     async fn ensure_no_legacy_releases(&self) -> Result<()> {
         let root = self.data_dir.join("releases");
         let mut channels = fs::read_dir(root).await?;
@@ -384,6 +421,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the publish blob operation required by UDS.
     async fn publish_blob(&self, staged: &StagedArtifact) -> Result<()> {
         validate_sha256(&staged.sha256)?;
         let target_dir = self.blob_dir(&staged.sha256);
@@ -409,6 +447,7 @@ impl Storage {
         }
     }
 
+    /// Performs the verify staged against existing operation required by UDS.
     async fn verify_staged_against_existing(&self, staged: &StagedArtifact) -> Result<()> {
         let path = self.blob_data_path(&staged.sha256);
         let metadata = fs::metadata(&path)
@@ -423,6 +462,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the verify blob operation required by UDS.
     async fn verify_blob(&self, artifact: &PlatformArtifact) -> Result<()> {
         validate_sha256(&artifact.sha256)?;
         let path = self.blob_data_path(&artifact.sha256);
@@ -441,6 +481,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the prune unreferenced blobs operation required by UDS.
     async fn prune_unreferenced_blobs(&self) -> Result<()> {
         let mut referenced = BTreeSet::new();
         let releases_root = self.data_dir.join("releases");
@@ -476,6 +517,7 @@ impl Storage {
         Ok(())
     }
 
+    /// Performs the list releases operation required by UDS.
     async fn list_releases(&self, channel: &str) -> Result<Vec<ReleaseManifest>> {
         validate_path_segment(channel, "channel")?;
         let channel_dir = self.data_dir.join("releases").join(channel);
@@ -493,6 +535,7 @@ impl Storage {
         Ok(releases)
     }
 
+    /// Performs the load manifest operation required by UDS.
     async fn load_manifest(&self, channel: &str, version: &str) -> Result<ReleaseManifest> {
         validate_path_segment(channel, "channel")?;
         let version = normalize_version(version)?;
@@ -505,18 +548,22 @@ impl Storage {
         Ok(serde_json::from_slice(&fs::read(path).await?)?)
     }
 
+    /// Performs the save manifest operation required by UDS.
     async fn save_manifest(&self, channel: &str, version: &str, manifest: &ReleaseManifest) -> Result<()> {
         atomic_write_json(self.manifest_path(channel, version), manifest).await
     }
 
+    /// Performs the release dir operation required by UDS.
     fn release_dir(&self, channel: &str, version: &str) -> PathBuf {
         self.data_dir.join("releases").join(channel).join(version)
     }
 
+    /// Performs the manifest path operation required by UDS.
     fn manifest_path(&self, channel: &str, version: &str) -> PathBuf {
         self.release_dir(channel, version).join("manifest.json")
     }
 
+    /// Performs the blob dir operation required by UDS.
     fn blob_dir(&self, sha256: &str) -> PathBuf {
         self.data_dir
             .join("blobs/sha256")
@@ -524,21 +571,25 @@ impl Storage {
             .join(sha256)
     }
 
+    /// Performs the blob data path operation required by UDS.
     fn blob_data_path(&self, sha256: &str) -> PathBuf {
         self.blob_dir(sha256).join("data")
     }
 }
 
+/// Parses updater versions while accepting the conventional optional `v` prefix.
 pub fn parse_version(version: &str) -> Result<Version> {
     let normalized = version.trim().trim_start_matches('v');
     Version::parse(normalized)
         .map_err(|error| UdsError::BadRequest(format!("invalid semantic version '{version}': {error}")))
 }
 
+/// Performs the normalize version operation required by UDS.
 fn normalize_version(version: &str) -> Result<String> {
     Ok(parse_version(version)?.to_string())
 }
 
+/// Performs the validate upload metadata operation required by UDS.
 fn validate_upload_metadata(
     metadata: &ReleaseUploadMetadata,
     files: &BTreeMap<String, StagedArtifact>,
@@ -593,6 +644,7 @@ fn validate_upload_metadata(
     Ok(())
 }
 
+/// Performs the validate path segment operation required by UDS.
 fn validate_path_segment(value: &str, name: &str) -> Result<()> {
     if value.is_empty()
         || value.contains('/')
@@ -608,6 +660,7 @@ fn validate_path_segment(value: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Performs the validate platform key operation required by UDS.
 fn validate_platform_key(value: &str) -> Result<()> {
     validate_path_segment(value, "platform")?;
     if !value.contains('-') {
@@ -618,6 +671,7 @@ fn validate_platform_key(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Performs the validate sha256 operation required by UDS.
 fn validate_sha256(value: &str) -> Result<()> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(UdsError::Storage(
@@ -627,10 +681,12 @@ fn validate_sha256(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Performs the sha256 hex operation required by UDS.
 fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
+/// Performs the sha256 file operation required by UDS.
 async fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).await?;
     let mut hasher = Sha256::new();
@@ -645,6 +701,7 @@ async fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Performs the atomic write json operation required by UDS.
 async fn atomic_write_json(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -689,6 +746,7 @@ mod tests {
         }
     }
 
+    /// Verifies that copy reuses content addressed blob.
     #[tokio::test]
     async fn copy_reuses_content_addressed_blob() {
         let temp = tempfile::tempdir().unwrap();

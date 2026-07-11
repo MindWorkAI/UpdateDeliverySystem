@@ -16,11 +16,19 @@ use url::Url;
 use crate::config::{ConfigureServerArgs, ListenerConfig, ServerConfig, ServerMode, TlsMode};
 use crate::errors::{Result, UdsError};
 
+/// Defines the DEFAULT CONFIG value used by UDS.
 const DEFAULT_CONFIG: &str = "uds.toml";
+
+/// Defines the SYSTEM CONFIG value used by UDS.
 const SYSTEM_CONFIG: &str = "/etc/uds/config.toml";
+
+/// Defines the SYSTEM BINARY value used by UDS.
 const SYSTEM_BINARY: &str = "/usr/local/bin/uds";
+
+/// Defines the UNIT PATH value used by UDS.
 const UNIT_PATH: &str = "/etc/systemd/system/uds.service";
 
+/// Runs the run workflow for UDS.
 pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     //
     // Load an existing single-node configuration or start from secure
@@ -169,6 +177,7 @@ pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     Ok(())
 }
 
+/// Performs the prompt listener tls operation required by UDS.
 fn prompt_listener_tls(label: &str, listener: &mut ListenerConfig) -> Result<()> {
     listener.tls.mode = Select::new(
         &format!("{label} TLS mode:"),
@@ -194,6 +203,7 @@ fn prompt_listener_tls(label: &str, listener: &mut ListenerConfig) -> Result<()>
     Ok(())
 }
 
+/// Performs the insecure listener names operation required by UDS.
 fn insecure_listener_names(config: &ServerConfig) -> Vec<&'static str> {
     let mut names = Vec::new();
     if config.public_api.tls.mode == TlsMode::Off && !config.public_api.bind.ip().is_loopback() {
@@ -205,6 +215,7 @@ fn insecure_listener_names(config: &ServerConfig) -> Vec<&'static str> {
     names
 }
 
+/// Performs the prompt advanced operation required by UDS.
 fn prompt_advanced(config: &mut ServerConfig) -> Result<()> {
     config.logging.level = prompt_text("Log level/filter:", &config.logging.level)?;
     config.logging.file.enabled = prompt_bool("Enable file logging?", config.logging.file.enabled)?;
@@ -252,6 +263,7 @@ fn prompt_advanced(config: &mut ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// Performs the prompt text operation required by UDS.
 fn prompt_text(message: &str, default: &str) -> Result<String> {
     Text::new(message)
         .with_default(default)
@@ -259,6 +271,7 @@ fn prompt_text(message: &str, default: &str) -> Result<String> {
         .map_err(prompt_error)
 }
 
+/// Performs the prompt parse operation required by UDS.
 fn prompt_parse<T>(message: &str, default: T) -> Result<T>
 where
     T: std::str::FromStr + fmt::Display,
@@ -270,6 +283,7 @@ where
         .map_err(|error| config_error(format!("invalid value for {message} {error}")))
 }
 
+/// Performs the prompt bool operation required by UDS.
 fn prompt_bool(message: &str, default: bool) -> Result<bool> {
     Confirm::new(message)
         .with_default(default)
@@ -277,10 +291,12 @@ fn prompt_bool(message: &str, default: bool) -> Result<bool> {
         .map_err(prompt_error)
 }
 
+/// Performs the prompt error operation required by UDS.
 fn prompt_error(error: inquire::InquireError) -> UdsError {
     config_error(format!("prompt failed: {error}"))
 }
 
+/// Performs the load existing operation required by UDS.
 fn load_existing(path: &Path) -> Result<Option<(String, ServerConfig)>> {
     if !path.exists() {
         return Ok(None);
@@ -301,6 +317,7 @@ fn load_existing(path: &Path) -> Result<Option<(String, ServerConfig)>> {
     Ok(Some((text, config)))
 }
 
+/// Validates the validate preflight input before UDS trusts or persists it.
 pub fn validate_preflight(config: &ServerConfig, destination: &Path) -> Result<()> {
     config.validate()?;
     let url = Url::parse(&config.public_base_url)
@@ -346,6 +363,7 @@ pub fn validate_preflight(config: &ServerConfig, destination: &Path) -> Result<(
     Ok(())
 }
 
+/// Performs the check readable operation required by UDS.
 fn check_readable(path: &Path, label: &str) -> Result<()> {
     OpenOptions::new()
         .read(true)
@@ -359,6 +377,7 @@ fn check_readable(path: &Path, label: &str) -> Result<()> {
         })
 }
 
+/// Performs the check destination operation required by UDS.
 fn check_destination(path: &Path) -> Result<()> {
     if path.exists() {
         OpenOptions::new()
@@ -380,6 +399,7 @@ fn check_destination(path: &Path) -> Result<()> {
     }
 }
 
+/// Performs the check directory target operation required by UDS.
 fn check_directory_target(path: &Path, label: &str) -> Result<()> {
     let mut candidate = path;
     while !candidate.exists() {
@@ -403,6 +423,7 @@ fn check_directory_target(path: &Path, label: &str) -> Result<()> {
             candidate.display()
         )));
     }
+
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -421,10 +442,14 @@ fn check_directory_target(path: &Path, label: &str) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 /// Result of atomically saving a configuration and its optional backup.
 pub struct SaveOutcome {
+    /// The path carried by this UDS data contract.
     pub path: PathBuf,
+
+    /// The backup carried by this UDS data contract.
     pub backup: Option<PathBuf>,
 }
 
+/// Provides the atomic save operation used by UDS callers.
 pub fn atomic_save(path: &Path, config: &ServerConfig, mode: u32) -> Result<SaveOutcome> {
     config.validate()?;
     let parent = path
@@ -456,6 +481,7 @@ pub fn atomic_save(path: &Path, config: &ServerConfig, mode: u32) -> Result<Save
     })
 }
 
+/// Performs the next backup path operation required by UDS.
 fn next_backup_path(path: &Path) -> PathBuf {
     for index in 0.. {
         let suffix = if index == 0 {
@@ -471,6 +497,7 @@ fn next_backup_path(path: &Path) -> PathBuf {
     unreachable!()
 }
 
+/// Performs the set mode operation required by UDS.
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -478,17 +505,20 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Verifies that set mode.
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Performs the sync directory operation required by UDS.
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 
+/// Provides the redacted toml operation used by UDS callers.
 pub fn redacted_toml(config: &ServerConfig) -> Result<String> {
     let mut copy = config.clone();
     copy.owner_token_verifier = "<redacted>".into();
@@ -498,6 +528,7 @@ pub fn redacted_toml(config: &ServerConfig) -> Result<String> {
     toml::to_string_pretty(&copy).map_err(|error| config_error(format!("could not render review: {error}")))
 }
 
+/// Produces the render systemd unit representation returned or displayed by UDS.
 pub fn render_systemd_unit(config: &ServerConfig, binary: &Path, config_path: &Path) -> String {
     let data = absolute_path(&config.data_dir);
     let log = config
@@ -562,6 +593,7 @@ WantedBy=multi-user.target
     .to_string()
 }
 
+/// Performs the install systemd operation required by UDS.
 fn install_systemd(config: &ServerConfig, config_path: &Path) -> Result<()> {
     let data_dir = absolute_path(&config.data_dir);
     if [
@@ -627,6 +659,7 @@ fn install_systemd(config: &ServerConfig, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Performs the ensure service account operation required by UDS.
 fn ensure_service_account() -> Result<()> {
     if !Command::new("getent")
         .args(["group", "uds"])
@@ -663,6 +696,7 @@ fn ensure_service_account() -> Result<()> {
     Ok(())
 }
 
+/// Performs the choose binary operation required by UDS.
 fn choose_binary() -> Result<PathBuf> {
     let current = std::env::current_exe()?;
     let risky =
@@ -702,6 +736,7 @@ fn choose_binary() -> Result<PathBuf> {
     }
 }
 
+/// Performs the verify service operation required by UDS.
 fn verify_service(config: &ServerConfig) -> Result<()> {
     let status = Command::new("systemctl")
         .args(["is-active", "uds.service"])
@@ -729,6 +764,7 @@ fn verify_service(config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// Performs the show diagnostics operation required by UDS.
 fn show_diagnostics() {
     for args in [
         ["status", "--no-pager", "uds.service"].as_slice(),
@@ -741,6 +777,7 @@ fn show_diagnostics() {
     }
 }
 
+/// Performs the systemd available operation required by UDS.
 fn systemd_available() -> bool {
     cfg!(target_os = "linux")
         && Path::new("/run/systemd/system").is_dir()
@@ -752,18 +789,24 @@ fn systemd_available() -> bool {
             .is_ok_and(|s| s.success())
 }
 
+/// Performs the is root operation required by UDS.
 #[cfg(unix)]
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
+
+/// Verifies that is root.
 #[cfg(not(unix))]
 fn is_root() -> bool {
     false
 }
 
+/// Performs the is in home operation required by UDS.
 fn is_in_home(path: &Path) -> bool {
     std::env::var_os("HOME").is_some_and(|home| absolute_path(path).starts_with(home))
 }
+
+/// Performs the absolute path operation required by UDS.
 fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -772,6 +815,7 @@ fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Performs the run checked operation required by UDS.
 fn run_checked(command: &mut Command, action: &str) -> Result<()> {
     let output = command.output()?;
     if output.status.success() {
@@ -784,6 +828,7 @@ fn run_checked(command: &mut Command, action: &str) -> Result<()> {
     }
 }
 
+/// Performs the write atomic text operation required by UDS.
 fn write_atomic_text(path: &Path, value: &str, mode: u32) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -795,6 +840,7 @@ fn write_atomic_text(path: &Path, value: &str, mode: u32) -> Result<()> {
     sync_directory(parent)
 }
 
+/// Performs the copy atomic operation required by UDS.
 fn copy_atomic(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     let parent = destination.parent().unwrap();
     fs::create_dir_all(parent)?;
@@ -808,6 +854,7 @@ fn copy_atomic(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     sync_directory(parent)
 }
 
+/// Performs the parse channels operation required by UDS.
 fn parse_channels(value: &str) -> Result<BTreeSet<String>> {
     let channels = value
         .split(',')
@@ -829,18 +876,25 @@ fn parse_channels(value: &str) -> Result<BTreeSet<String>> {
     Ok(channels)
 }
 
+/// Performs the display optional path operation required by UDS.
 fn display_optional_path(path: Option<&Path>) -> String {
     path.map(|p| p.display().to_string()).unwrap_or_default()
 }
+
+/// Performs the config error operation required by UDS.
 fn config_error(message: impl Into<String>) -> UdsError {
     UdsError::Config(message.into())
 }
+
+/// Performs the report saved operation required by UDS.
 fn report_saved(outcome: &SaveOutcome) {
     println!("Saved configuration to {}", outcome.path.display());
     if let Some(path) = &outcome.backup {
         println!("Original preserved in protected backup {}", path.display());
     }
 }
+
+/// Performs the print next steps operation required by UDS.
 fn print_next_steps(config: &ServerConfig) {
     println!(
         "\nNext steps:\n- Health: {}/health\n- Logs: journalctl -u uds -f\n- Client: uds client configure\n- Terminate TLS at a reverse proxy unless TLS files are configured.\n- Back up the configuration and {} regularly.",
@@ -852,7 +906,10 @@ fn print_next_steps(config: &ServerConfig) {
 #[derive(Clone, Copy, Debug)]
 /// TLS choices currently supported by the interactive configuration wizard.
 enum WizardTlsMode {
+    /// Represents the item concept used by UDS.
     Off,
+
+    /// Represents the item concept used by UDS.
     Files,
 }
 impl fmt::Display for WizardTlsMode {
@@ -875,11 +932,17 @@ impl From<WizardTlsMode> for TlsMode {
         }
     }
 }
+
 #[derive(Clone, Copy, Debug)]
 /// Source from which the systemd installer obtains the UDS executable.
 enum BinaryChoice {
+    /// Represents the item concept used by UDS.
     Copy,
+
+    /// Represents the item concept used by UDS.
     Current,
+
+    /// Represents the item concept used by UDS.
     Cancel,
 }
 impl fmt::Display for BinaryChoice {
@@ -910,6 +973,7 @@ mod tests {
         config
     }
 
+    /// Verifies that redacts secrets.
     #[test]
     fn redacts_secrets() {
         let dir = tempfile::tempdir().unwrap();
@@ -921,6 +985,7 @@ mod tests {
         assert!(review.contains("<redacted>"));
     }
 
+    /// Verifies that atomic save reloads and protects config and backup.
     #[test]
     fn atomic_save_reloads_and_protects_config_and_backup() {
         let dir = tempfile::tempdir().unwrap();
@@ -949,6 +1014,7 @@ mod tests {
         );
     }
 
+    /// Verifies that unit is hardened and only grants low port capability.
     #[test]
     fn unit_is_hardened_and_only_grants_low_port_capability() {
         let mut config = valid_config(Path::new("/srv/uds-test"));
@@ -999,6 +1065,7 @@ WantedBy=multi-user.target
         assert_eq!(privileged, expected_privileged);
     }
 
+    /// Verifies that rejects bad url and channels.
     #[test]
     fn rejects_bad_url_and_channels() {
         let dir = tempfile::tempdir().unwrap();

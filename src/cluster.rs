@@ -22,9 +22,16 @@ use crate::models::ReplicationEvent;
 #[derive(Debug, Clone)]
 /// Shared cluster identity and peer state for one running UDS node.
 pub struct ClusterState {
+    /// Stores the node id value used by this UDS component.
     node_id: String,
+
+    /// Stores the enabled value used by this UDS component.
     enabled: bool,
+
+    /// Stores the peers value used by this UDS component.
     peers: Arc<Mutex<BTreeSet<String>>>,
+
+    /// Stores the cluster token value used by this UDS component.
     cluster_token: Option<String>,
 }
 
@@ -123,6 +130,7 @@ pub fn spawn_background_tasks(config: ServerConfig, cluster: ClusterState) {
     });
 }
 
+/// Performs the broadcast presence operation required by UDS.
 async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
@@ -133,6 +141,7 @@ async fn broadcast_presence(config: &ServerConfig, cluster: &ClusterState) -> Re
     Ok(())
 }
 
+/// Performs the presence message operation required by UDS.
 fn presence_message(config: &ServerConfig, cluster: &ClusterState) -> String {
     let fleet_base_url = &config
         .fleet_api
@@ -142,6 +151,7 @@ fn presence_message(config: &ServerConfig, cluster: &ClusterState) -> String {
     format!("uds:{}:{}", cluster.node_id(), fleet_base_url)
 }
 
+/// Performs the load or create node id operation required by UDS.
 async fn load_or_create_node_id(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
     if path.exists() {
@@ -162,6 +172,7 @@ mod tests {
     use super::*;
     use crate::config::{FleetApiConfig, TlsConfig};
 
+    /// Verifies that discovery advertises fleet base url.
     #[tokio::test]
     async fn discovery_advertises_fleet_base_url() {
         let temp = tempfile::tempdir().unwrap();

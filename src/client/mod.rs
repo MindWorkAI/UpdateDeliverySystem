@@ -11,6 +11,7 @@ mod prompts;
 use crate::config::ClientCommand;
 use crate::errors::Result;
 
+/// Runs the run workflow for UDS.
 pub async fn run(command: Option<ClientCommand>) -> Result<()> {
     prompts::run(command).await
 }

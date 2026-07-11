@@ -54,11 +54,14 @@ UDS source code is maintained for people first, including developers who are new
 
 - Give every struct and enum, including private request and state types, a `///` comment that explains what it represents and why UDS needs it.
 - Document fields and enum variants when their meaning, unit, source, security impact, or lifecycle is not immediately clear.
-- Document every public function. Add intent comments to private functions whose behavior, side effects, error handling, or concurrency is not obvious.
+- Document every function and method with `///`, regardless of visibility. This includes test functions, test helpers, and standard trait implementations. Explain the UDS-specific purpose, behavior, or guarantee instead of merely repeating the function name.
+- Document public and private modules, constants, fields, and enum variants as well. The Rust `missing_docs` lint covers the public API and Clippy's `missing_docs_in_private_items` covers internal code; both are required at deny level and must pass for every target.
+- Treat a documented or annotated struct field or enum variant as one visual block: keep its documentation, attributes, and declaration together, and separate it from the next block with a blank line. Undocumented and unannotated fields may remain compact.
 - Start every non-trivial module with a `//!` comment describing its responsibility and its place in UDS.
 - Prefer named intermediate values over deeply nested expressions when the names make the data flow easier to follow.
 - Keep each module focused on one responsibility. Treat roughly 500 lines of production code as a prompt to look for a useful responsibility boundary, not as a mechanical limit.
 - Keep `src/main.rs` limited to the Tokio entry point and application startup. Put command dispatch, server lifecycle, and shutdown behavior in dedicated modules.
+- Give each interactive client prompt use case its own module. Keep prompt dispatch and the main menu in `client::prompts`, and put shared selection or profile helpers in focused support code.
 
 # Rust formatting
 Run `cargo fmt` for the normal Rust layout, using the repository's `rustfmt.toml`. Human-readable layout takes precedence where rustfmt cannot express the intent:

@@ -8,6 +8,12 @@ description = "Update Delivery System for MindWork AI Studio"
 [package.metadata.uds]
 build = 1
 
+[lints.clippy]
+missing_docs_in_private_items = "deny"
+
+[lints.rust]
+missing_docs = "deny"
+
 [[bin]]
 name = "uds"
 path = "src/main.rs"

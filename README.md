@@ -10,6 +10,18 @@ This repository contains the initial Rust implementation. The single-node update
 
 ## Quick Start: Single Node
 
+The interactive wizard creates or updates a validated single-node configuration. It redacts
+secrets in its review, protects changed files with a backup, and can optionally install a hardened
+systemd service when run as root on a systemd-based Linux host:
+
+```bash
+uds server configure --config /etc/uds/config.toml
+```
+
+The wizard supports TLS termination outside UDS or existing certificate/key files. ACME and fleet
+setup intentionally remain separate future workflows. Existing non-interactive server commands
+remain supported.
+
 Create a configuration file:
 
 ```toml

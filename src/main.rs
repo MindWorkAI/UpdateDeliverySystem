@@ -1,21 +1,31 @@
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use update_delivery_system::cluster::{ClusterState, spawn_background_tasks};
-use update_delivery_system::config::{Cli, CliCommand};
+use update_delivery_system::config::{Cli, CliCommand, ServerArgs};
 use update_delivery_system::{AppState, ServerConfig, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(CliCommand::Client { command }) = cli.command {
-        update_delivery_system::logging::init_client_logging()?;
-        update_delivery_system::client::run(command).await?;
-        return Ok(());
+    match cli.command {
+        Some(CliCommand::Server(args)) => run_server(args).await,
+        Some(CliCommand::Client { command }) => {
+            update_delivery_system::logging::init_client_logging()?;
+            update_delivery_system::client::run(command).await?;
+            Ok(())
+        }
+        None => {
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
+        }
     }
+}
 
-    let config = ServerConfig::load(&cli).await?;
+async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
+    let config = ServerConfig::load(&args).await?;
     let logging = update_delivery_system::logging::init_server_logging(&config)?;
     let storage = update_delivery_system::storage::Storage::new(
         config.data_dir.clone(),

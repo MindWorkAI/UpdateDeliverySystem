@@ -455,12 +455,14 @@ impl UploadConfig {
 
 impl ServerConfig {
     pub async fn load(args: &ServerArgs) -> Result<Self> {
-        let mut config = if let Some(path) = &args.config {
-            let text = tokio::fs::read_to_string(path).await?;
-            toml::from_str::<ServerConfig>(&text)?
-        } else {
-            Self::development_default()
-        };
+        let path = args.config.as_ref().ok_or_else(|| {
+            UdsError::Config(
+                "server configuration is required; pass --config <path> or run 'uds server configure'"
+                    .to_string(),
+            )
+        })?;
+        let text = tokio::fs::read_to_string(path).await?;
+        let mut config = toml::from_str::<ServerConfig>(&text)?;
 
         if args.single_node_mode {
             config.mode = ServerMode::SingleNode;
@@ -470,7 +472,7 @@ impl ServerConfig {
         Ok(config)
     }
 
-    pub fn development_default() -> Self {
+    fn single_node_template() -> Self {
         Self {
             mode: ServerMode::SingleNode,
             public_api: ListenerConfig {
@@ -482,9 +484,9 @@ impl ServerConfig {
                 tls: TlsConfig::default(),
             },
             fleet_api: None,
-            public_base_url: "http://127.0.0.1:8080".to_string(),
-            data_dir: PathBuf::from("./uds-data"),
-            owner_token_verifier: crate::auth::verifier("uds_owner_v1_change-me-owner-token"),
+            public_base_url: "https://updates.example.org".to_string(),
+            data_dir: PathBuf::from("/var/lib/uds"),
+            owner_token_verifier: String::new(),
             cluster_token: None,
             channels: default_channels(),
             cluster: ClusterConfig::default(),
@@ -497,10 +499,17 @@ impl ServerConfig {
 
     /// Safe starting point for an interactively configured production server.
     pub fn production_single_node_default() -> Self {
-        let mut config = Self::development_default();
-        config.public_base_url = "https://updates.example.org".to_string();
-        config.data_dir = PathBuf::from("/var/lib/uds");
-        config.owner_token_verifier = String::new();
+        let mut config = Self::single_node_template();
+        config.cluster.node_id_path = config.data_dir.join("node-id");
+        config
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        let mut config = Self::single_node_template();
+        config.public_base_url = "http://127.0.0.1:8080".to_string();
+        config.data_dir = PathBuf::from("./uds-data");
+        config.owner_token_verifier = crate::auth::verifier("uds_owner_v1_test-only-owner-token");
         config.cluster.node_id_path = config.data_dir.join("node-id");
         config
     }
@@ -803,6 +812,20 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn server_runtime_requires_an_explicit_config_file() {
+        let args = ServerArgs {
+            config: None,
+            single_node_mode: false,
+            command: None,
+        };
+        let error = ServerConfig::load(&args).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "configuration error: server configuration is required; pass --config <path> or run 'uds server configure'"
+        );
+    }
+
     #[test]
     fn old_root_level_server_options_are_rejected() {
         assert!(Cli::try_parse_from(["uds", "--single-node-mode"]).is_err());
@@ -823,7 +846,7 @@ mod tests {
 
     #[test]
     fn fleet_mode_requires_cluster_token() {
-        let mut config = ServerConfig::development_default();
+        let mut config = ServerConfig::test_default();
         config.mode = ServerMode::Fleet;
         config.cluster_token = None;
         let result = config.validate();
@@ -832,7 +855,7 @@ mod tests {
 
     #[test]
     fn fleet_api_matches_server_mode_and_rejects_wildcard_url() {
-        let mut config = ServerConfig::development_default();
+        let mut config = ServerConfig::test_default();
         config.fleet_api = Some(FleetApiConfig {
             bind: "10.20.0.12:8082".parse().unwrap(),
             fleet_base_url: "http://10.20.0.12:8082".into(),
@@ -866,7 +889,7 @@ mod tests {
 
     #[test]
     fn shutdown_defaults_to_five_minutes_and_rejects_zero() {
-        let mut config = ServerConfig::development_default();
+        let mut config = ServerConfig::test_default();
         assert_eq!(config.shutdown.grace_period_seconds, 300);
         config.shutdown.grace_period_seconds = 0;
         assert!(config.validate().is_err());

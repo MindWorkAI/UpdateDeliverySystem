@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::multipart::{Form, Part};
 
-use crate::auth::AdminTokenMetadata;
+use crate::auth::{AdminTokenMetadata, CreatedAdminToken};
 use crate::client::config::ClientProfile;
 use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
@@ -15,13 +15,6 @@ use crate::models::{
 };
 use crate::stats::ChannelStats;
 use zeroize::Zeroize;
-
-#[derive(serde::Deserialize)]
-pub struct CreatedAdminToken {
-    #[serde(flatten)]
-    pub metadata: AdminTokenMetadata,
-    pub token: String,
-}
 
 impl Drop for AdminClient {
     fn drop(&mut self) {

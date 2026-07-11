@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_advertises_fleet_base_url() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = ServerConfig::development_default();
+        let mut config = ServerConfig::test_default();
         config.data_dir = temp.path().into();
         config.mode = ServerMode::Fleet;
         config.cluster_token = Some("a-long-cluster-token".into());

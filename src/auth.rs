@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use tokio::fs;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::errors::{Result, UdsError};
 
@@ -80,6 +81,20 @@ pub struct AdminTokenMetadata {
     pub disabled_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+}
+
+/// A successful response returned when a new admin token is created. Keeping the
+/// metadata nested avoids field-name collisions as the response evolves.
+#[derive(Serialize, Deserialize)]
+pub struct CreatedAdminToken {
+    pub metadata: AdminTokenMetadata,
+    pub token: String,
+}
+
+impl Drop for CreatedAdminToken {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
 }
 
 impl From<&AdminTokenRecord> for AdminTokenMetadata {

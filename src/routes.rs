@@ -18,7 +18,7 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::auth::{AdminTokenMetadata, AdminTokenStore};
+use crate::auth::{AdminTokenMetadata, AdminTokenStore, CreatedAdminToken};
 use crate::cluster::ClusterState;
 use crate::config::LogLevel;
 use crate::config::ServerConfig;
@@ -142,13 +142,6 @@ struct SetAdminTokenStatusRequest {
     reason: String,
 }
 
-#[derive(serde::Serialize)]
-struct CreateAdminTokenResponse {
-    #[serde(flatten)]
-    metadata: AdminTokenMetadata,
-    token: String,
-}
-
 async fn list_admin_tokens(State(state): State<AppState>, _auth: OwnerAuth) -> Result<Response> {
     no_store(Json(state.auth.list().await).into_response())
 }
@@ -175,7 +168,7 @@ async fn create_admin_token(
         &metadata,
         None,
     );
-    no_store(Json(CreateAdminTokenResponse { metadata, token }).into_response())
+    no_store(Json(CreatedAdminToken { metadata, token }).into_response())
 }
 
 async fn set_admin_token_status(
@@ -984,7 +977,7 @@ mod tests {
         AppState,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = ServerConfig::development_default();
+        let mut config = ServerConfig::test_default();
         config.data_dir = temp.path().to_path_buf();
         config.logging.file.enabled = false;
         config.logging.admin_api.enabled = false;
@@ -1048,7 +1041,7 @@ mod tests {
                 Request::post("/admin/v1/channels/stable/releases")
                     .header(
                         header::AUTHORIZATION,
-                        "Bearer uds_owner_v1_change-me-owner-token",
+                        "Bearer uds_owner_v1_test-only-owner-token",
                     )
                     .header(
                         header::CONTENT_TYPE,
@@ -1140,7 +1133,7 @@ mod tests {
                 Request::post("/admin/v1/admin-tokens")
                     .header(
                         header::AUTHORIZATION,
-                        "Bearer uds_owner_v1_change-me-owner-token",
+                        "Bearer uds_owner_v1_test-only-owner-token",
                     )
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -1156,7 +1149,11 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let token = created["token"].as_str().unwrap();
         assert!(token.starts_with("uds_admin_v1_"));
+        assert_eq!(created.as_object().unwrap().len(), 2);
+        assert_eq!(created["metadata"]["name"], "Thorsten");
+        assert!(created.get("id").is_none());
         assert!(created.get("verifier").is_none());
+        assert!(created["metadata"].get("verifier").is_none());
 
         let forbidden = admin
             .clone()

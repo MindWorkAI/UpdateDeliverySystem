@@ -97,10 +97,7 @@ impl FromRequestParts<AppState> for ClusterAuth {
     }
 }
 
-fn require_bearer(
-    headers: &HeaderMap,
-    expected_token: &str,
-) -> Result<(), &'static str> {
+fn require_bearer(headers: &HeaderMap, expected_token: &str) -> Result<(), &'static str> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err("missing");
     };

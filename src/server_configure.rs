@@ -543,6 +543,8 @@ WantedBy=multi-user.target
         data.display(),
         log.display()
     )
+    .trim_start()
+    .to_string()
 }
 
 fn install_systemd(config: &ServerConfig, config_path: &Path) -> Result<()> {

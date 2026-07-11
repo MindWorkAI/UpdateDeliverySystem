@@ -22,6 +22,10 @@ The wizard supports TLS termination outside UDS or existing certificate/key file
 setup intentionally remain separate future workflows. Existing non-interactive server commands
 remain supported.
 
+Runtime server starts always require `--config`. Running `uds server` without a configuration
+fails closed and points to the configuration wizard; UDS never creates or prints an ephemeral
+owner credential during startup.
+
 Create a configuration file:
 
 ```toml
@@ -315,7 +319,23 @@ The following token-management endpoints accept only the owner token. A valid ad
 - `POST /admin/v1/admin-tokens` with `{ "name": "…", "reason": "…" }`
 - `PATCH /admin/v1/admin-tokens/{uuid}` with `{ "enabled": false, "reason": "…" }`
 
-The creation response is the only place the new token secret appears. Names and creation reasons are immutable. Every real enable/disable transition appends its required reason to immutable history; repeating the current state is idempotent.
+The creation response keeps extensible metadata separate from the one-time secret:
+
+```json
+{
+  "metadata": {
+    "id": "4aaf79c9-08c9-40e6-a16f-13c19023ad83",
+    "name": "Release automation",
+    "created_at": "2026-07-11T18:00:00Z",
+    "creation_reason": "Publish approved releases",
+    "enabled": true,
+    "status_history": []
+  },
+  "token": "uds_admin_v1_4aaf79c9-08c9-40e6-a16f-13c19023ad83_<base64url-secret>"
+}
+```
+
+This response is the only place the new token secret appears. Names and creation reasons are immutable. Every real enable/disable transition appends its required reason to immutable history; repeating the current state is idempotent.
 
 Log API responses use newline-delimited JSON (`application/x-ndjson`) and require file logging plus `logging.admin_api.enabled = true`.
 

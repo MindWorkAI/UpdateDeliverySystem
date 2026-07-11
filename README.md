@@ -83,6 +83,9 @@ queue_capacity = 8192
 max_pending_events = 100000
 rollup_trigger_events = 10000
 rollup_interval_seconds = 900
+
+[shutdown]
+grace_period_seconds = 300
 ```
 
 ### Modes
@@ -115,7 +118,9 @@ For HTTP/3, terminate TLS and HTTP/3 at the edge and proxy to UDS over HTTP/1.1 
 GET /health
 ```
 
-Returns basic service status, system mode, and node ID.
+Returns basic service status, system mode, and node ID. After shutdown has started, the endpoint
+returns `503 Service Unavailable` with `{"status":"draining"}` for any request that was already
+accepted before the listener closed.
 
 ### Update Check
 
@@ -320,6 +325,7 @@ Group=uds
 ExecStart=/usr/local/bin/uds server --config /etc/uds/config.toml
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=330s
 StandardOutput=journal
 StandardError=journal
 ReadWritePaths=/var/lib/uds /var/log/mindwork-ai/uds
@@ -327,6 +333,20 @@ ReadWritePaths=/var/lib/uds /var/log/mindwork-ai/uds
 [Install]
 WantedBy=multi-user.target
 ```
+
+### Graceful shutdown
+
+On `SIGTERM` (the signal used by `systemctl stop`) or `SIGINT`, UDS immediately closes its listener
+and reports itself as draining. Existing artifact downloads and release uploads may finish for up to
+`shutdown.grace_period_seconds`, which defaults to 300 seconds. Once the deadline expires, UDS logs
+each remaining transfer and closes its connection. A second shutdown signal skips the remaining
+grace period.
+
+Configure the load balancer to use `/health`, remove an unreachable or non-2xx node from rotation,
+and retry failed connection attempts on another healthy node. Its detection interval still governs
+how quickly it proactively removes a draining node; closing the UDS listener prevents new
+connections in the meantime. Set systemd's `TimeoutStopSec` higher than the UDS grace period so the
+service has time to write its final transfer and shutdown events.
 
 ## Fleet Operation
 

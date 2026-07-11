@@ -11,6 +11,7 @@ pub mod logging;
 pub mod models;
 pub mod routes;
 pub mod security;
+pub mod shutdown;
 pub mod stats;
 pub mod storage;
 pub mod tls;

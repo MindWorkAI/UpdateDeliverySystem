@@ -134,6 +134,9 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub stats: StatsConfig,
+
+    #[serde(default)]
+    pub shutdown: ShutdownConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +167,12 @@ pub struct StatsConfig {
 
     #[serde(default = "default_stats_rollup_interval_seconds")]
     pub rollup_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownConfig {
+    #[serde(default = "default_shutdown_grace_period_seconds")]
+    pub grace_period_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +365,14 @@ impl Default for StatsConfig {
     }
 }
 
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            grace_period_seconds: default_shutdown_grace_period_seconds(),
+        }
+    }
+}
+
 impl UploadConfig {
     pub fn policy(&self) -> Result<crate::models::UploadPolicy> {
         let max_artifact_bytes = self
@@ -413,6 +430,7 @@ impl ServerConfig {
             logging: LoggingConfig::default(),
             upload: UploadConfig::default(),
             stats: StatsConfig::default(),
+            shutdown: ShutdownConfig::default(),
         }
     }
 
@@ -503,6 +521,11 @@ impl ServerConfig {
         if self.stats.rollup_trigger_events > self.stats.max_pending_events {
             return Err(UdsError::Config(
                 "stats.rollup_trigger_events must not exceed stats.max_pending_events".to_string(),
+            ));
+        }
+        if self.shutdown.grace_period_seconds == 0 {
+            return Err(UdsError::Config(
+                "shutdown.grace_period_seconds must be greater than zero".to_string(),
             ));
         }
 
@@ -599,6 +622,9 @@ fn default_stats_rollup_trigger_events() -> usize {
 fn default_stats_rollup_interval_seconds() -> u64 {
     900
 }
+fn default_shutdown_grace_period_seconds() -> u64 {
+    300
+}
 
 #[cfg(test)]
 mod tests {
@@ -678,5 +704,27 @@ mod tests {
             assert_eq!(parsed, expected);
         }
         assert!(serde_json::from_str::<ClientIpLoggingMode>("\"sometimes\"").is_err());
+    }
+
+    #[test]
+    fn shutdown_defaults_to_five_minutes_and_rejects_zero() {
+        let mut config = ServerConfig::development_default();
+        assert_eq!(config.shutdown.grace_period_seconds, 300);
+        config.shutdown.grace_period_seconds = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn existing_config_without_shutdown_section_gets_default() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+                mode = "single-node"
+                public_base_url = "https://updates.example.org"
+                data_dir = "/var/lib/uds"
+                admin_token = "a-long-admin-token"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.shutdown.grace_period_seconds, 300);
     }
 }

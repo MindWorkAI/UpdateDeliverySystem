@@ -115,10 +115,13 @@ async fn poll(client: &AdminClient, id: Uuid) -> Result<()> {
 enum UpdateChoice {
     /// Exact release offered by the server.
     Release(AvailableRelease),
+
     /// Switches from the regular list to the explicit prerelease list.
     ShowPrereleases,
+
     /// Returns from prereleases to the regular list.
     ShowRegular,
+
     /// Leaves without submitting an operation.
     Cancel,
 }

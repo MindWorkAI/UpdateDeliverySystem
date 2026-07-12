@@ -138,7 +138,6 @@ pub struct AdminTokenMetadata {
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
     )]
-
     /// The disabled at carried by this UDS data contract.
     pub disabled_at: Option<OffsetDateTime>,
 

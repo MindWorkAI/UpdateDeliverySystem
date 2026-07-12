@@ -603,7 +603,7 @@ WantedBy=multi-user.target
 /// Renders the root oneshot which alone may replace `/usr/local/bin/uds`.
 pub fn render_update_unit(config: &ServerConfig) -> String {
     format!(
-r#"[Unit]
+        r#"[Unit]
 Description=Apply a manually selected UDS update
 After=uds.service
 
@@ -630,7 +630,7 @@ LockPersonality=true
 /// Renders the limited path trigger installed only by the single-node wizard.
 pub fn render_update_path_unit(config: &ServerConfig) -> String {
     format!(
-r#"[Unit]
+        r#"[Unit]
 Description=Watch for explicitly staged UDS updates
 
 [Path]

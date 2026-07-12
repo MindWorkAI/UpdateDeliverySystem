@@ -101,18 +101,25 @@ pub struct StartUpdateRequest {
 pub enum OperationStatus {
     /// Accepted and waiting for the staging task.
     Queued,
+
     /// Release metadata and archive are being downloaded.
     Downloading,
+
     /// Signed inputs are durable and ready for the privileged helper.
     Staged,
+
     /// The helper is replacing the executable and restarting UDS.
     Applying,
+
     /// The replacement reported full listener readiness.
     BootConfirmed,
+
     /// The replacement remained active during the observation period.
     Succeeded,
+
     /// The previous executable was restored automatically.
     RolledBack,
+
     /// Staging, replacement, or restoration failed.
     Failed,
 }
@@ -141,14 +148,19 @@ pub struct UpdateOperation {
 struct UpdateManifest {
     /// Supported manifest schema revision.
     schema_version: u64,
+
     /// Release semantic version.
     version: String,
+
     /// Release build number.
     build: u64,
+
     /// Git tag that owns the assets.
     tag: String,
+
     /// Administrator-facing release notes.
     notes: String,
+
     /// Signed artifacts indexed by platform and architecture.
     artifacts: BTreeMap<String, UpdateArtifact>,
 }
@@ -158,14 +170,19 @@ struct UpdateManifest {
 struct UpdateArtifact {
     /// Exact archive download URL.
     url: String,
+
     /// Lowercase SHA-256 archive digest.
     sha256: String,
+
     /// Exact archive size in bytes.
     size: u64,
+
     /// Signed archive container format.
     archive_format: String,
+
     /// Only member the helper may extract.
     executable_path: String,
+
     /// Release-pipeline permission for executable replacement.
     self_update_supported: bool,
 }
@@ -175,10 +192,13 @@ struct UpdateArtifact {
 struct GithubRelease {
     /// Release tag used for exact selection.
     tag_name: String,
+
     /// Drafts must never be offered.
     draft: bool,
+
     /// Category used for strict list separation.
     prerelease: bool,
+
     /// Downloadable release assets.
     assets: Vec<GithubAsset>,
 }
@@ -188,6 +208,7 @@ struct GithubRelease {
 struct GithubAsset {
     /// Stable asset file name.
     name: String,
+
     /// GitHub-provided download URL.
     browser_download_url: String,
 }
@@ -196,12 +217,16 @@ struct GithubAsset {
 pub struct UpdateManager {
     /// Durable operation directory below the configured data root.
     root: PathBuf,
+
     /// Stable identity restricting requests to this node.
     node_id: Uuid,
+
     /// Narrow installation capability determined at startup.
     supported: bool,
+
     /// Serializes idempotency and active-operation checks.
     lock: Mutex<()>,
+
     /// Reusable HTTPS client for official GitHub assets.
     http: reqwest::Client,
 }

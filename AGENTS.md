@@ -57,6 +57,7 @@ UDS source code is maintained for people first, including developers who are new
 - Document every function and method with `///`, regardless of visibility. This includes test functions, test helpers, and standard trait implementations. Explain the UDS-specific purpose, behavior, or guarantee instead of merely repeating the function name.
 - Document public and private modules, constants, fields, and enum variants as well. The Rust `missing_docs` lint covers the public API and Clippy's `missing_docs_in_private_items` covers internal code; both are required at deny level and must pass for every target.
 - Treat a documented or annotated struct field or enum variant as one visual block: keep its documentation, attributes, and declaration together, and separate it from the next block with a blank line. Undocumented and unannotated fields may remain compact.
+- `build.rs` enforces this visual block rule for Rust files below `src/` and `tests/` during Cargo builds.
 - Start every non-trivial module with a `//!` comment describing its responsibility and its place in UDS.
 - Prefer named intermediate values over deeply nested expressions when the names make the data flow easier to follow.
 - Keep each module focused on one responsibility. Treat roughly 500 lines of production code as a prompt to look for a useful responsibility boundary, not as a mechanical limit.

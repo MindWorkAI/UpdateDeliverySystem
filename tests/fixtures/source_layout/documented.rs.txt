@@ -1,0 +1,15 @@
+struct Record {
+    /// First value.
+    first: String,
+
+    /// Second value.
+    second: String,
+}
+
+enum State {
+    /// Work has started.
+    Started,
+
+    /// Work has stopped.
+    Stopped,
+}

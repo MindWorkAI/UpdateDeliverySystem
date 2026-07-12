@@ -1,0 +1,11 @@
+struct Record {
+    /// First.
+    first: bool,
+    #[serde(default)]
+    second: bool,
+
+
+    /// Third.
+
+    third: bool,
+}

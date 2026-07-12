@@ -1,0 +1,19 @@
+struct Record {
+    #[serde(default)]
+    values: Option<
+        Vec<String>,
+    >,
+
+    #[serde(skip)]
+    hidden: bool,
+}
+
+enum Event {
+    #[serde(rename = "ready")]
+    Ready {
+        value: String,
+    },
+
+    #[serde(other)]
+    Unknown,
+}

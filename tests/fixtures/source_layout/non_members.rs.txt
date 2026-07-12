@@ -1,0 +1,9 @@
+/// A module-level operation.
+fn run() {}
+
+/// A documented data type.
+#[derive(Debug)]
+struct Record {
+    plain: bool,
+    compact: bool,
+}

@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, UdsError};
 
-pub use cli::{Cli, CliCommand, ClientCommand, ConfigureServerArgs, ServerArgs, ServerCommand, TokenCommand};
+pub use cli::{
+    ApplyUpdatesArgs, Cli, CliCommand, ClientCommand, ConfigureServerArgs, ServerArgs, ServerCommand, TokenCommand,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]

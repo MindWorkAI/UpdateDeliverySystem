@@ -31,6 +31,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 update_delivery_system::server_configure::run(configure_args).await?;
                 Ok(())
             }
+            Some(ServerCommand::ApplyUpdates(apply_args)) => {
+                update_delivery_system::self_update::apply_pending(&apply_args.data_dir, &apply_args.binary)?;
+                Ok(())
+            }
             None => run_server(args).await,
         },
         Some(CliCommand::Client { command }) => {
@@ -65,6 +69,8 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
         update_delivery_system::stats::StatsRecorder::new(config.data_dir.clone(), config.stats.clone()).await?;
     let cluster = ClusterState::new(&config).await?;
     let auth = update_delivery_system::auth::AdminTokenStore::open(&config.data_dir).await?;
+    let update_node_id = uuid::Uuid::parse_str(cluster.node_id())?;
+    let updates = update_delivery_system::self_update::UpdateManager::open(&config, update_node_id).await?;
     tracing::info!(
         mode = ?config.mode,
         public_base_url = %config.public_base_url,
@@ -91,6 +97,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
         logging: logging.clone(),
         shutdown: shutdown.clone(),
         auth: Arc::new(auth),
+        updates: Arc::new(updates),
     };
     let stats = state.stats.clone();
     warn_insecure_listener("public", config.public_api.bind, &config.public_api.tls);
@@ -98,7 +105,6 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     if let Some(fleet) = &config.fleet_api {
         warn_insecure_listener("fleet", fleet.bind, &fleet.tls);
     }
-
     //
     // Start each configured listener with an independent shutdown handle. A
     // listener failure triggers the same controlled drain as an OS signal.
@@ -136,6 +142,8 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
             handle,
         ));
     }
+    tokio::task::yield_now().await;
+    notify_ready();
     let grace_period = Duration::from_secs(config.shutdown.grace_period_seconds);
     let first = tokio::select! {
         result = listeners.join_next() => Err(anyhow::anyhow!("listener ended unexpectedly: {:?}", result)),
@@ -204,6 +212,23 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Signals systemd only after initialization and all listener tasks were started.
+#[cfg(unix)]
+fn notify_ready() {
+    use std::os::unix::net::UnixDatagram;
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(socket);
+    if let Ok(sender) = UnixDatagram::unbound() {
+        let _ = sender.send_to(b"READY=1", path);
+    }
+}
+
+/// Does nothing on platforms without systemd notification sockets.
+#[cfg(not(unix))]
+fn notify_ready() {}
 
 /// Performs the warn insecure listener operation required by UDS.
 fn warn_insecure_listener(name: &str, bind: std::net::SocketAddr, tls: &update_delivery_system::config::TlsConfig) {

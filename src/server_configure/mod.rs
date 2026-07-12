@@ -28,6 +28,12 @@ const SYSTEM_BINARY: &str = "/usr/local/bin/uds";
 /// Defines the UNIT PATH value used by UDS.
 const UNIT_PATH: &str = "/etc/systemd/system/uds.service";
 
+/// Root-owned oneshot unit that applies cryptographically verified staging data.
+const UPDATE_UNIT_PATH: &str = "/etc/systemd/system/uds-update.service";
+
+/// Bounded filesystem trigger for explicitly submitted update operations.
+const UPDATE_PATH_UNIT: &str = "/etc/systemd/system/uds-update.path";
+
 /// Runs the run workflow for UDS.
 pub async fn run(args: ConfigureServerArgs) -> Result<()> {
     //
@@ -558,7 +564,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=uds
 Group=uds
 ExecStart={} server --config {}
@@ -591,6 +598,50 @@ WantedBy=multi-user.target
     )
     .trim_start()
     .to_string()
+}
+
+/// Renders the root oneshot which alone may replace `/usr/local/bin/uds`.
+pub fn render_update_unit(config: &ServerConfig) -> String {
+    format!(
+r#"[Unit]
+Description=Apply a manually selected UDS update
+After=uds.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/uds server apply-updates --data-dir {} --binary /usr/local/bin/uds
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin {}
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
+"#,
+        absolute_path(&config.data_dir).display(),
+        absolute_path(&config.data_dir).display()
+    )
+}
+
+/// Renders the limited path trigger installed only by the single-node wizard.
+pub fn render_update_path_unit(config: &ServerConfig) -> String {
+    format!(
+r#"[Unit]
+Description=Watch for explicitly staged UDS updates
+
+[Path]
+PathChanged={}/self-update/operations
+Unit=uds-update.service
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        absolute_path(&config.data_dir).display()
+    )
 }
 
 /// Performs the install systemd operation required by UDS.
@@ -637,6 +688,16 @@ fn install_systemd(config: &ServerConfig, config_path: &Path) -> Result<()> {
         &render_systemd_unit(config, &binary, config_path),
         0o644,
     )?;
+    write_atomic_text(
+        Path::new(UPDATE_UNIT_PATH),
+        &render_update_unit(config),
+        0o644,
+    )?;
+    write_atomic_text(
+        Path::new(UPDATE_PATH_UNIT),
+        &render_update_path_unit(config),
+        0o644,
+    )?;
     run_checked(
         Command::new("systemctl").arg("daemon-reload"),
         "reload systemd",
@@ -649,6 +710,10 @@ fn install_systemd(config: &ServerConfig, config_path: &Path) -> Result<()> {
         run_checked(
             Command::new("systemctl").args(["enable", "--now", "uds.service"]),
             "enable and start uds.service",
+        )?;
+        run_checked(
+            Command::new("systemctl").args(["enable", "--now", "uds-update.path"]),
+            "enable the manual update trigger",
         )?;
         run_checked(
             Command::new("systemctl").args(["restart", "uds.service"]),
@@ -1029,7 +1094,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=uds
 Group=uds
 ExecStart=/usr/local/bin/uds server --config /etc/uds/config.toml
@@ -1063,6 +1129,14 @@ WantedBy=multi-user.target
             "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
         );
         assert_eq!(privileged, expected_privileged);
+
+        let update = render_update_unit(&config);
+        assert!(update.contains("Type=oneshot"));
+        assert!(update.contains("User=root"));
+        assert!(update.contains("ReadWritePaths=/usr/local/bin /srv/uds-test/data"));
+        let trigger = render_update_path_unit(&config);
+        assert!(trigger.contains("PathChanged=/srv/uds-test/data/self-update/operations"));
+        assert!(trigger.contains("Unit=uds-update.service"));
     }
 
     /// Verifies that rejects bad url and channels.

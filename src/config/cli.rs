@@ -1,7 +1,7 @@
 //! Command-line contract for the UDS server and administration client.
 //!
 //! Keeping Clap-specific types separate prevents command parsing concerns from
-//! obscuring the persisted server configuration schema.
+//! obscuring the persisting server configuration schema.
 
 use std::path::PathBuf;
 
@@ -59,6 +59,22 @@ pub struct ServerArgs {
 pub enum ServerCommand {
     /// Interactively create or update a single-node server configuration.
     Configure(ConfigureServerArgs),
+
+    /// Apply every signed staged update (invoked only by the systemd helper).
+    #[command(hide = true)]
+    ApplyUpdates(ApplyUpdatesArgs),
+}
+
+/// Paths supplied by the root-owned update oneshot unit.
+#[derive(Debug, Args)]
+pub struct ApplyUpdatesArgs {
+    /// Data directory containing unprivileged staging operations.
+    #[arg(long)]
+    pub data_dir: PathBuf,
+
+    /// Fixed the executable installed by the configuration assistant.
+    #[arg(long, default_value = "/usr/local/bin/uds")]
+    pub binary: PathBuf,
 }
 
 /// Input for the guided server configuration workflow.
@@ -89,6 +105,9 @@ pub enum ClientCommand {
 
     /// Show channel statistics.
     Stats,
+
+    /// Select and confirm one manual UDS update.
+    Updates,
 
     /// Manage personal admin tokens using the break-glass owner token.
     Tokens {

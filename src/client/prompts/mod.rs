@@ -9,6 +9,7 @@ mod copy;
 mod logs;
 mod stats;
 mod tokens;
+mod updates;
 mod upload;
 mod withdraw;
 
@@ -35,6 +36,7 @@ pub async fn run(command: Option<ClientCommand>) -> Result<()> {
         Some(ClientCommand::Copy) => copy::run().await,
         Some(ClientCommand::Changelog) => changelog::run().await,
         Some(ClientCommand::Stats) => stats::run().await,
+        Some(ClientCommand::Updates) => updates::run().await,
         Some(ClientCommand::Tokens { command }) => tokens::run(command).await,
         Some(ClientCommand::Logs {
             follow,
@@ -57,6 +59,7 @@ async fn main_menu() -> Result<()> {
             MenuAction::Changelog,
             MenuAction::Stats,
             MenuAction::Logs,
+            MenuAction::Updates,
             MenuAction::Configure,
         ],
     )
@@ -71,6 +74,7 @@ async fn main_menu() -> Result<()> {
         MenuAction::Changelog => changelog::run().await,
         MenuAction::Stats => stats::run().await,
         MenuAction::Logs => logs::run(false, 200, None, false).await,
+        MenuAction::Updates => updates::run().await,
     }
 }
 
@@ -203,6 +207,9 @@ enum MenuAction {
 
     /// Represents the item concept used by UDS.
     Logs,
+
+    /// Opens the explicit manual UDS update selection workflow.
+    Updates,
 }
 
 impl std::fmt::Display for MenuAction {
@@ -215,6 +222,7 @@ impl std::fmt::Display for MenuAction {
             MenuAction::Changelog => write!(formatter, "Correct changelog"),
             MenuAction::Stats => write!(formatter, "Show statistics"),
             MenuAction::Logs => write!(formatter, "Show logs"),
+            MenuAction::Updates => write!(formatter, "Update UDS manually"),
         }
     }
 }

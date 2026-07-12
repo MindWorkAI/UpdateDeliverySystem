@@ -36,7 +36,10 @@ pub fn build_admin_router(state: AppState) -> Router {
         .route("/admin/v1/channels/{target_channel}/copy", post(copy_release))
         .route("/admin/v1/channels/{channel}/stats", get(channel_stats))
         .route("/admin/v1/admin-tokens", get(list_admin_tokens).post(create_admin_token))
-        .route("/admin/v1/admin-tokens/{id}", patch(set_admin_token_status));
+        .route("/admin/v1/admin-tokens/{id}", patch(set_admin_token_status))
+        .route("/admin/v1/updates/releases", get(update_releases))
+        .route("/admin/v1/updates", post(start_update))
+        .route("/admin/v1/updates/{operation_id}", get(update_status));
 
     if state.config.logging.admin_api.enabled && state.config.logging.file.enabled {
         router = router

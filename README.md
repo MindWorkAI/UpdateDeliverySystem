@@ -10,11 +10,11 @@ This repository contains the initial Rust implementation. The single-node update
 
 ## Supported Platforms and Production Use
 
-For production deployments, we strongly recommend running UDS on a maintained Linux server. The macOS and Windows builds are intended for development, testing, and evaluation. Automatic UDS updates are available only for supported Linux installations.
+For production deployments, we strongly recommend running UDS on a maintained Linux server. The macOS and Windows builds are intended for development, testing, and evaluation. The manual UDS Update Feature is available only for supported Linux installations.
 
 Release binaries are provided for Linux on x86_64 and ARM64, macOS on Apple Silicon, and Windows on x86_64 and ARM64. Linux releases use the standard GNU target and require glibc; Alpine Linux and other systems that provide only musl are not supported. Each release documents the minimum glibc symbol version detected during its build.
 
-Automatic updates are planned for systemd-managed Linux installations. Manually launched processes must be updated and restarted manually. Containerized deployments must use their image and orchestrator rollout instead of replacing the executable inside a running container.
+The UDS Update Feature supports only single nodes installed by the configuration assistant as `/usr/local/bin/uds` and managed by systemd. It never updates unattended or on a schedule: an administrator must select and confirm one exact version with `uds client updates`. Manually launched processes must be replaced and restarted by their administrator. Containerized deployments must use their image and orchestrator rollout instead of replacing the executable inside a running container.
 
 ## UDS Release Process
 
@@ -254,21 +254,29 @@ uds client tokens disable <uuid>
 
 The first client run offers to create a local profile. The profile stores the UDS base URL, one personal admin token, and the default channel in a user-local config file. Owner tokens are never stored in client profiles or any separate client configuration. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
 
-### Planned UDS Self-Updates
+### UDS Update Feature
 
-Self-updating UDS nodes are a planned Linux-only capability. The release pipeline already provides a signed `latest.json` manifest for this future workflow, but the client commands and server endpoints described here are not implemented yet.
+Run `uds client updates` to update a supported single node manually. The client initially lists only newer regular releases. The administrator may switch to a separate prerelease list, switch back, choose one exact version, review its version, build, and release notes, and then explicitly confirm or cancel. UDS never chooses a version, updates unattended, or runs updates on a schedule.
 
-The planned `uds client updates` workflow keeps every administrator request on the Admin API behind the load balancer:
+The authenticated Admin API implements:
 
-1. The client requests the fleet view through the load balancer. The receiving node becomes the coordinator and returns stable node IDs, versions, builds, update capability, health, and last-seen timestamps.
-2. The administrator selects one node, several nodes, or the entire fleet. Prereleases are excluded unless the administrator explicitly enables the Canary option.
-3. The client submits the update operation and selected node IDs through the load balancer. It never needs private node addresses.
-4. The receiving coordinator resolves each node ID to the private Fleet API URL learned through discovery. It executes a local target itself and forwards other targets directly through the Fleet API. Broadcast is used for discovery, not for update commands or release archives.
-5. Each target verifies the Ed25519 manifest signature, platform, architecture, and SHA-256 digest before staging the new executable. A systemd-managed Linux node atomically swaps the executable, retains the previous version for rollback, and asks systemd to restart the service.
+- `GET /admin/v1/updates/releases?kind=regular|prerelease` for local node identity, current version/build, capability, and newer releases in exactly one category.
+- `POST /admin/v1/updates` with a client-generated operation UUID, the local node ID, exact version, and explicit prerelease permission.
+- `GET /admin/v1/updates/{operation_id}` for durable status (`queued`, `downloading`, `staged`, `applying`, `boot_confirmed`, `succeeded`, `rolled_back`, or `failed`).
 
-Update operations will have stable operation IDs, be idempotent, and expose fleet-wide status so polling through the load balancer does not require a sticky session. Fleet-wide rollouts will use configurable batches with health checks and a pause between batches. Automatic updates will not be offered on macOS or Windows; those builds remain intended for development, testing, and evaluation.
+Repeated identical POSTs are idempotent; reusing an operation UUID for different input returns `409 Conflict`, and a node accepts only one active operation. Polling tolerates the expected connection interruption while systemd restarts UDS.
 
-This workflow depends on completing peer discovery. Nodes must receive presence broadcasts, expire stale peers, and retain the mapping from each stable node ID to its advertised private `fleet_base_url` before targeted updates can be implemented safely.
+UDS retrieves official GitHub releases page by page, excludes drafts and invalid or non-newer SemVer tags, and keeps regular releases separate from prereleases. Before staging, it verifies the Ed25519 signature over `latest.json` with the embedded public key and checks schema, tag, Linux platform, architecture, update support, archive size, and SHA-256. The unprivileged service atomically stores only the verified manifest, signature, archive, and operation data below `data_dir/self-update/operations`.
+
+The configuration assistant installs a hardened readiness-aware `uds.service`, a root `uds-update.service` oneshot, and a bounded `uds-update.path` trigger. The helper verifies the signed inputs again, reads only the signed regular executable entry from the archive, rejects unsafe paths and links, retains the old executable as `/usr/local/bin/uds.previous`, and restarts UDS. If the new service does not remain active for 30 seconds, the helper restores the previous executable. A successful update retains `uds.previous` until the next successful update; a successful rollback restores the regular `uds` path and leaves no `uds.previous`.
+
+Other executable locations, manually started services, containers, macOS, Windows, and fleet mode do not support this feature.
+
+#### Planned Fleet Updates
+
+Fleet updates remain planned. Administrators will select nodes through the load balancer, submit stable operations, configure batches, require health checks, and pause between batches. The coordinator will resolve stable node IDs to private Fleet API addresses and direct work to each target; clients will not need private addresses.
+
+This requires complete peer discovery, stale-peer expiry, and real replication first. Until those prerequisites exist, fleet mode explicitly reports the UDS Update Feature as unavailable. The signed release manifest and signing process are the shared trust foundation for today's single-node workflow and this later fleet workflow.
 
 ### Configure the Client
 

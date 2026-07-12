@@ -13,6 +13,7 @@ use crate::client::import::PreparedUpload;
 use crate::errors::{Result, UdsError};
 use crate::logging::LogEventLine;
 use crate::models::{ChangelogPatchRequest, CopyReleaseRequest, MutationResponse, ReleaseListResponse, UploadPolicy};
+use crate::self_update::{ReleaseKind, ReleaseResponse, StartUpdateRequest, UpdateOperation};
 use crate::stats::ChannelStats;
 use zeroize::Zeroize;
 
@@ -97,6 +98,27 @@ impl AdminClient {
     /// Fetches server limits before the client prepares an upload.
     pub async fn upload_policy(&self) -> Result<UploadPolicy> {
         self.get_json("/admin/v1/upload-policy").await
+    }
+
+    /// Retrieves the explicitly selected regular or prerelease update list.
+    pub async fn update_releases(&self, kind: ReleaseKind) -> Result<ReleaseResponse> {
+        let kind = match kind {
+            ReleaseKind::Regular => "regular",
+            ReleaseKind::Prerelease => "prerelease",
+        };
+        self.get_json(&format!("/admin/v1/updates/releases?kind={kind}"))
+            .await
+    }
+
+    /// Submits one client-generated idempotent update request.
+    pub async fn start_update(&self, request: &StartUpdateRequest) -> Result<UpdateOperation> {
+        self.post_json("/admin/v1/updates", request).await
+    }
+
+    /// Polls one durable update operation after staging or a restart.
+    pub async fn update_status(&self, operation_id: uuid::Uuid) -> Result<UpdateOperation> {
+        self.get_json(&format!("/admin/v1/updates/{operation_id}"))
+            .await
     }
 
     /// Streams release metadata and artifacts to the selected channel.

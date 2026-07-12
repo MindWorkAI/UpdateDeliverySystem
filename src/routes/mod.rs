@@ -37,6 +37,7 @@ use crate::models::{
     ReplicationEvent, ReplicationEventType, UploadPolicy,
 };
 use crate::security::{AdminAuth, ClusterAuth, OwnerAuth};
+use crate::self_update::{ReleaseKind, ReleaseResponse, StartUpdateRequest, UpdateManager, UpdateOperation};
 use crate::shutdown::{ShutdownState, TransferKind};
 use crate::stats::{ChannelStats, StatsEvent, StatsEventKind, StatsRecorder};
 use crate::storage::{StagedArtifact, Storage};
@@ -69,6 +70,43 @@ pub struct AppState {
 
     /// The auth carried by this UDS data contract.
     pub auth: Arc<AdminTokenStore>,
+
+    /// Persistent coordinator for the local manual UDS Update Feature.
+    pub updates: Arc<UpdateManager>,
+}
+
+/// Query selecting the regular or explicitly requested prerelease list.
+#[derive(serde::Deserialize)]
+struct UpdateReleaseQuery {
+    /// Release category to enumerate; prereleases never leak into regular results.
+    kind: ReleaseKind,
+}
+
+/// Lists signed, newer releases for this node.
+async fn update_releases(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Query(query): Query<UpdateReleaseQuery>,
+) -> Result<Json<ReleaseResponse>> {
+    Ok(Json(state.updates.releases(query.kind).await?))
+}
+
+/// Starts one exact, explicitly confirmed update operation.
+async fn start_update(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(request): Json<StartUpdateRequest>,
+) -> Result<Json<UpdateOperation>> {
+    Ok(Json(state.updates.start(request).await?))
+}
+
+/// Returns durable status so polling survives a service restart.
+async fn update_status(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(operation_id): Path<Uuid>,
+) -> Result<Json<UpdateOperation>> {
+    Ok(Json(state.updates.get(operation_id).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -974,6 +1012,11 @@ mod tests {
                 .unwrap(),
         );
         let cluster = ClusterState::new(&config).await.unwrap();
+        let updates = Arc::new(
+            UpdateManager::open(&config, Uuid::parse_str(cluster.node_id()).unwrap())
+                .await
+                .unwrap(),
+        );
         let shutdown = Arc::new(ShutdownState::default());
         let auth = Arc::new(AdminTokenStore::open(&config.data_dir).await.unwrap());
         let state = AppState {
@@ -984,6 +1027,7 @@ mod tests {
             logging: Arc::new(LoggingRuntime::disabled()),
             shutdown: shutdown.clone(),
             auth,
+            updates,
         };
         let public = build_public_router(state.clone());
         let admin = build_admin_router(state.clone());

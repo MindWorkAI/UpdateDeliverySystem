@@ -1,0 +1,469 @@
+name: Build and release UDS
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  RELEASE_ARTIFACT_RETENTION_DAYS: 30
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-22.04
+    outputs:
+      build: ${{ steps.metadata.outputs.build }}
+      rust_version: ${{ steps.rust.outputs.version }}
+      version: ${{ steps.metadata.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve latest Rust stable
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable --no-self-update
+          rustup component add --toolchain stable clippy rustfmt
+          version=$(rustc +stable --version | awk '{print $2}')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          rustc +stable --version --verbose
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: quality-rust-${{ steps.rust.outputs.version }}
+
+      - name: Validate tag, Cargo metadata, and changelog
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag '$tag' is not v<SemVer>."
+            exit 1
+          fi
+
+          version=$(cargo +"${{ steps.rust.outputs.version }}" metadata --locked --no-deps --format-version 1 | jq -er '.packages[0].version')
+          build=$(awk '
+            /^\[package.metadata.uds\]$/ { in_metadata = 1; next }
+            /^\[/ && in_metadata { exit }
+            in_metadata && $1 == "build" { gsub(/[^0-9]/, "", $3); print $3; exit }
+          ' Cargo.toml)
+
+          if [[ "$tag" != "v${version}" ]]; then
+            echo "Tag '$tag' does not match Cargo package version 'v${version}'."
+            exit 1
+          fi
+          if [[ ! "$build" =~ ^[1-9][0-9]*$ ]]; then
+            echo "UDS build '$build' is not a positive integer."
+            exit 1
+          fi
+
+          expected_heading="# UDS v${version}"
+          first_heading=$(grep -m1 '^# UDS v' CHANGELOG.md || true)
+          if [[ "$first_heading" != "$expected_heading" ]]; then
+            echo "The first UDS changelog heading must be '$expected_heading'."
+            exit 1
+          fi
+
+          awk -v heading="$expected_heading" '
+            $0 == heading { found = 1 }
+            found && $0 != heading && /^# UDS v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-changelog.md
+          if [[ ! -s release-changelog.md ]] || ! grep -q '^- ' release-changelog.md; then
+            echo "The current release changelog is empty or has no entries."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
+      - name: Check formatting
+        run: cargo +"${{ steps.rust.outputs.version }}" fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo +"${{ steps.rust.outputs.version }}" clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo +"${{ steps.rust.outputs.version }}" test --locked --all-targets
+
+      - name: Build documentation
+        run: cargo +"${{ steps.rust.outputs.version }}" doc --locked --no-deps
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            executable: uds
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: uds
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            executable: uds
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            executable: uds.exe
+          - runner: windows-2025
+            target: aarch64-pc-windows-msvc
+            executable: uds.exe
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install release toolchain
+        shell: bash
+        env:
+          RUST_VERSION: ${{ needs.validate.outputs.rust_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
+          rustc +"$RUST_VERSION" --version --verbose
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: ${{ matrix.target }}-rust-${{ needs.validate.outputs.rust_version }}
+
+      - name: Build release binary
+        shell: bash
+        env:
+          RUST_VERSION: ${{ needs.validate.outputs.rust_version }}
+          TARGET: ${{ matrix.target }}
+        run: cargo +"$RUST_VERSION" build --release --locked --target "$TARGET"
+
+      - name: Smoke-test native binary
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        shell: bash
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          TARGET: ${{ matrix.target }}
+        run: target/$TARGET/release/$EXECUTABLE version
+
+      - name: Validate Windows ARM64 machine type
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $path = "target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0xaa64) {
+              throw "Expected ARM64 PE machine 0xAA64, got 0x$($machine.ToString('X4'))."
+          }
+
+      - name: Determine required glibc version
+        if: runner.os == 'Linux'
+        id: glibc
+        shell: bash
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(readelf --version-info "target/$TARGET/release/$EXECUTABLE" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sort -Vu | tail -n1)
+          if [[ -z "$version" ]]; then
+            echo "Could not determine the required glibc version."
+            exit 1
+          fi
+          printf '%s\n' "$version" > glibc-version.txt
+          echo "Required glibc version: $version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage binary
+        shell: bash
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          cp "target/$TARGET/release/$EXECUTABLE" "staging/uds-$TARGET${EXECUTABLE#uds}"
+          if [[ -f glibc-version.txt ]]; then
+            cp glibc-version.txt "staging/glibc-version-$TARGET.txt"
+          fi
+
+      - name: Upload raw binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raw-${{ matrix.target }}
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    name: Assemble and sign release
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      BUILD: ${{ needs.validate.outputs.build }}
+      RUST_VERSION: ${{ needs.validate.outputs.rust_version }}
+      UDS_UPDATE_SIGNING_KEY_PEM: ${{ secrets.UDS_UPDATE_SIGNING_KEY_PEM }}
+      VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: raw-*
+          path: raw
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/assets
+
+          package_target() {
+            local target="$1"
+            local extension="$2"
+            local platform_note="$3"
+            local directory="uds-v${VERSION}-${target}"
+            local source="raw/raw-${target}/uds-${target}${extension}"
+
+            test -f "$source"
+            mkdir -p "release/package/$directory"
+            cp "$source" "release/package/$directory/uds${extension}"
+            cp LICENSE "release/package/$directory/LICENSE"
+
+            {
+              echo "UDS v${VERSION} (build ${BUILD})"
+              echo "Target: ${target}"
+              echo "Rust: ${RUST_VERSION}"
+              echo
+              echo "$platform_note"
+              if [[ -f "raw/raw-${target}/glibc-version-${target}.txt" ]]; then
+                echo "Minimum detected glibc symbol version: $(cat "raw/raw-${target}/glibc-version-${target}.txt")"
+              fi
+            } > "release/package/$directory/INSTALL.txt"
+
+            if [[ "$extension" == ".exe" ]]; then
+              (cd release/package && zip -q -r "../assets/${directory}.zip" "$directory")
+            else
+              tar -C release/package -czf "release/assets/${directory}.tar.gz" "$directory"
+            fi
+          }
+
+          package_target "aarch64-apple-darwin" "" "This macOS build is intended for development, testing, and evaluation."
+          package_target "x86_64-unknown-linux-gnu" "" "Linux is the recommended platform for production UDS deployments."
+          package_target "aarch64-unknown-linux-gnu" "" "Linux is the recommended platform for production UDS deployments."
+          package_target "x86_64-pc-windows-msvc" ".exe" "This Windows build is intended for development, testing, and evaluation."
+          package_target "aarch64-pc-windows-msvc" ".exe" "This Windows build is intended for development, testing, and evaluation."
+
+          (cd release/assets && sha256sum uds-v* > SHA256SUMS)
+
+      - name: Create signed update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_key="release/uds-update-public-key.pem"
+          if [[ ! -f "$public_key" ]]; then
+            echo "The public update key '$public_key' is missing."
+            exit 1
+          fi
+          if [[ -z "$UDS_UPDATE_SIGNING_KEY_PEM" ]]; then
+            echo "GitHub secret UDS_UPDATE_SIGNING_KEY_PEM is missing."
+            exit 1
+          fi
+
+          published_at=$(date --utc +'%Y-%m-%dT%H:%M:%SZ')
+          expected_heading="# UDS v${VERSION}"
+          awk -v heading="$expected_heading" '
+            $0 == heading { found = 1 }
+            found && $0 != heading && /^# UDS v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-changelog.md
+
+          jq -n \
+            --arg version "$VERSION" \
+            --argjson build "$BUILD" \
+            --arg tag "v${VERSION}" \
+            --arg published_at "$published_at" \
+            --rawfile notes release-changelog.md \
+            '{
+              schema_version: 1,
+              version: $version,
+              build: $build,
+              tag: $tag,
+              published_at: $published_at,
+              notes: $notes,
+              artifacts: {}
+            }' > release/assets/latest.json
+
+          add_artifact() {
+            local platform="$1"
+            local target="$2"
+            local archive_format="$3"
+            local self_update_supported="$4"
+            local extension="$5"
+            local file_name="uds-v${VERSION}-${target}.${archive_format}"
+            local path="release/assets/${file_name}"
+            local executable_path="uds-v${VERSION}-${target}/uds${extension}"
+            local url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${file_name}"
+            local sha256
+            local size
+
+            sha256=$(sha256sum "$path" | awk '{print $1}')
+            size=$(stat --format='%s' "$path")
+            jq \
+              --arg platform "$platform" \
+              --arg url "$url" \
+              --arg sha256 "$sha256" \
+              --argjson size "$size" \
+              --arg archive_format "$archive_format" \
+              --arg executable_path "$executable_path" \
+              --argjson self_update_supported "$self_update_supported" \
+              '.artifacts[$platform] = {
+                url: $url,
+                sha256: $sha256,
+                size: $size,
+                archive_format: $archive_format,
+                executable_path: $executable_path,
+                self_update_supported: $self_update_supported
+              }' release/assets/latest.json > release/assets/latest.json.tmp
+            mv release/assets/latest.json.tmp release/assets/latest.json
+          }
+
+          add_artifact "darwin-aarch64" "aarch64-apple-darwin" "tar.gz" false ""
+          add_artifact "linux-x86_64" "x86_64-unknown-linux-gnu" "tar.gz" true ""
+          add_artifact "linux-aarch64" "aarch64-unknown-linux-gnu" "tar.gz" true ""
+          add_artifact "windows-x86_64" "x86_64-pc-windows-msvc" "zip" false ".exe"
+          add_artifact "windows-aarch64" "aarch64-pc-windows-msvc" "zip" false ".exe"
+
+          key_file="$RUNNER_TEMP/uds-update-private-key.pem"
+          derived_public_key="$RUNNER_TEMP/uds-update-public-key.pem"
+          normalized_public_key="$RUNNER_TEMP/uds-update-public-key.expected.pem"
+          signature_file="$RUNNER_TEMP/latest.json.sig.bin"
+          umask 077
+          printf '%s\n' "$UDS_UPDATE_SIGNING_KEY_PEM" > "$key_file"
+          openssl pkey -in "$key_file" -pubout -out "$derived_public_key"
+          openssl pkey -pubin -in "$public_key" -pubout -out "$normalized_public_key"
+          cmp "$derived_public_key" "$normalized_public_key"
+          openssl pkeyutl -sign -rawin -inkey "$key_file" -in release/assets/latest.json -out "$signature_file"
+          base64 --wrap=0 "$signature_file" > release/assets/latest.json.sig
+          printf '\n' >> release/assets/latest.json.sig
+          base64 --decode release/assets/latest.json.sig > "$RUNNER_TEMP/latest.json.verify.sig"
+          openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" -in release/assets/latest.json -sigfile "$RUNNER_TEMP/latest.json.verify.sig"
+          rm -f "$key_file" "$signature_file" "$RUNNER_TEMP/latest.json.verify.sig"
+
+          jq -e '.artifacts | length == 5' release/assets/latest.json > /dev/null
+          sha256sum --check release/assets/SHA256SUMS
+
+      - name: Upload prepared release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: uds-v${{ needs.validate.outputs.version }}-release
+          path: release/assets/*
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(env.RELEASE_ARTIFACT_RETENTION_DAYS) }}
+
+  publish:
+    name: Scan and publish prerelease
+    needs: [validate, assemble]
+    runs-on: ubuntu-22.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download prepared release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: uds-v${{ needs.validate.outputs.version }}-release
+          path: release/assets
+
+      - name: Submit packages to VirusTotal
+        id: virus_total
+        uses: crazy-max/ghaction-virustotal@936d8c5c00afe97d3d9a1af26d017cfdf26800a2 # v5
+        with:
+          vt_api_key: ${{ secrets.VIRUS_TOTAL_KEY }}
+          request_rate: 4
+          vt_monitor: false
+          files: |
+            release/assets/*.tar.gz
+            release/assets/*.zip
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release/assets/*
+
+      - name: Build release notes
+        shell: bash
+        env:
+          ANALYSIS: ${{ steps.virus_total.outputs.analysis }}
+        run: |
+          set -euo pipefail
+          expected_heading="# UDS v${VERSION}"
+          awk -v heading="$expected_heading" '
+            $0 == heading { found = 1 }
+            found && $0 != heading && /^# UDS v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-body.md
+
+          {
+            echo
+            echo "## Virus scans"
+          } >> release-body.md
+
+          IFS=',' read -ra analyses <<< "$ANALYSIS"
+          if [[ "${#analyses[@]}" -ne 5 ]]; then
+            echo "VirusTotal returned ${#analyses[@]} analysis links; expected 5."
+            exit 1
+          fi
+          for item in "${analyses[@]}"; do
+            filename=$(basename "${item%%=*}")
+            link="${item#*=}"
+            echo "- [${filename}](${link})" >> release-body.md
+          done
+
+          {
+            echo
+            echo "## Integrity"
+            echo
+            echo "This release includes SHA-256 checksums, an Ed25519-signed update manifest, and GitHub build provenance attestations."
+          } >> release-body.md
+
+      - name: Publish GitHub prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          body_path: release-body.md
+          draft: false
+          fail_on_unmatched_files: true
+          files: release/assets/*
+          make_latest: false
+          name: UDS v${{ needs.validate.outputs.version }}
+          prerelease: true

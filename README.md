@@ -8,6 +8,35 @@ UDS can run as a small single-node system for one organization, or as a fleet be
 
 This repository contains the initial Rust implementation. The single-node update path, release storage, changelog updates, downloads, local statistics, TLS file mode, and fleet-mode switches are implemented. Fleet discovery and replication endpoints are present as the first runtime shape; deep peer-to-peer artifact synchronization will be expanded without changing the public API.
 
+## Supported Platforms and Production Use
+
+For production deployments, we strongly recommend running UDS on a maintained Linux server. The macOS and Windows builds are intended for development, testing, and evaluation. Automatic UDS updates are available only for supported Linux installations.
+
+Release binaries are provided for Linux on x86_64 and ARM64, macOS on Apple Silicon, and Windows on x86_64 and ARM64. Linux releases use the standard GNU target and require glibc; Alpine Linux and other systems that provide only musl are not supported. Each release documents the minimum glibc symbol version detected during its build.
+
+Automatic updates are planned for systemd-managed Linux installations. Manually launched processes must be updated and restarted manually. Containerized deployments must use their image and orchestrator rollout instead of replacing the executable inside a running container.
+
+## UDS Release Process
+
+The build and release workflow runs only when a `v<SemVer>` tag is pushed. The tag must match the package version in `Cargo.toml`, and the first section in `CHANGELOG.md` must use the matching `# UDS v<SemVer>` heading. Successful builds are submitted to VirusTotal before GitHub publishes them as a prerelease.
+
+The release workflow requires these GitHub Actions secrets:
+
+- `VIRUS_TOTAL_KEY`: API key used to submit the five release packages to VirusTotal.
+- `UDS_UPDATE_SIGNING_KEY_PEM`: complete PEM-encoded Ed25519 private key used only to sign `latest.json`.
+
+Generate the update-signing key pair on a trusted computer:
+
+```bash
+umask 077
+openssl genpkey -algorithm ED25519 -out uds-update-private-key.pem
+openssl pkey -in uds-update-private-key.pem -pubout -out uds-update-public-key.pem
+```
+
+Store the complete private PEM as the `UDS_UPDATE_SIGNING_KEY_PEM` secret and keep a protected offline backup. Never commit, upload, or share the private key. Commit the public PEM as `release/uds-update-public-key.pem`; the workflow verifies that it matches the private key before signing a release.
+
+Each release contains the five platform packages, `SHA256SUMS`, `latest.json`, and `latest.json.sig`. The JSON manifest is signed byte-for-byte, so reformatting it after signing invalidates its signature. Promoting the prerelease to a regular GitHub release makes its manifest available through `/releases/latest/download/latest.json`.
+
 ## Quick Start: Single Node
 
 The interactive wizard creates or updates a validated single-node configuration. It redacts
@@ -224,6 +253,22 @@ uds client tokens disable <uuid>
 ```
 
 The first client run offers to create a local profile. The profile stores the UDS base URL, one personal admin token, and the default channel in a user-local config file. Owner tokens are never stored in client profiles or any separate client configuration. UDS hardens this file so only the current user can read or write it on Linux and macOS, and uses `icacls` for equivalent best-effort ACL hardening on Windows.
+
+### Planned UDS Self-Updates
+
+Self-updating UDS nodes are a planned Linux-only capability. The release pipeline already provides a signed `latest.json` manifest for this future workflow, but the client commands and server endpoints described here are not implemented yet.
+
+The planned `uds client updates` workflow keeps every administrator request on the Admin API behind the load balancer:
+
+1. The client requests the fleet view through the load balancer. The receiving node becomes the coordinator and returns stable node IDs, versions, builds, update capability, health, and last-seen timestamps.
+2. The administrator selects one node, several nodes, or the entire fleet. Prereleases are excluded unless the administrator explicitly enables the Canary option.
+3. The client submits the update operation and selected node IDs through the load balancer. It never needs private node addresses.
+4. The receiving coordinator resolves each node ID to the private Fleet API URL learned through discovery. It executes a local target itself and forwards other targets directly through the Fleet API. Broadcast is used for discovery, not for update commands or release archives.
+5. Each target verifies the Ed25519 manifest signature, platform, architecture, and SHA-256 digest before staging the new executable. A systemd-managed Linux node atomically swaps the executable, retains the previous version for rollback, and asks systemd to restart the service.
+
+Update operations will have stable operation IDs, be idempotent, and expose fleet-wide status so polling through the load balancer does not require a sticky session. Fleet-wide rollouts will use configurable batches with health checks and a pause between batches. Automatic updates will not be offered on macOS or Windows; those builds remain intended for development, testing, and evaluation.
+
+This workflow depends on completing peer discovery. Nodes must receive presence broadcasts, expire stale peers, and retain the mapping from each stable node ID to its advertised private `fleet_base_url` before targeted updates can be implemented safely.
 
 ### Configure the Client
 
